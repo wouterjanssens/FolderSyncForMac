@@ -1,0 +1,52 @@
+name: CI
+
+# Validates that every pull request still compiles, passes its tests, and
+# builds a working app bundle before it can be merged. Also runs on pushes to
+# main as a safety net.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# Cancel an in-progress run if newer commits are pushed to the same PR/branch.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: macos-14
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      # Package.swift requires swift-tools-version 6.0 (for the built-in
+      # swift-testing framework), so select the newest Xcode 16 on the runner.
+      - name: Select Xcode 16
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)"
+
+      - name: Cache SwiftPM build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved', 'Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: Build (debug, treat warnings as errors)
+        run: swift build -Xswiftc -warnings-as-errors
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build FolderSync.app
+        run: ./build.sh
+
+      - name: Verify app bundle was produced
+        run: |
+          test -x FolderSync.app/Contents/MacOS/FolderSync
+          test -f FolderSync.app/Contents/Info.plist
+          echo "App bundle looks good."
