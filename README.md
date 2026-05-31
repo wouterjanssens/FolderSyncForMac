@@ -1,7 +1,7 @@
 # FolderSync
 
 A small, free, native macOS app for **one-way folder sync** (local → remote), built as a
-simpler personal alternative to GoodSync. It follows GoodSync's core *Analyze → Sync* workflow
+focused, no-frills personal tool. It follows a simple *Analyze → Sync* workflow
 but drops everything you don't need.
 
 ## What it does
@@ -20,7 +20,7 @@ but drops everything you don't need.
   file on the remote** instead of re-copying it and quarantining the old copy. This avoids
   re-transferring large files over the network for a rename. Detection runs only when the
   deletion policy is "move to _Deleted".
-- Change detection uses **size + modification time** (the same heuristic rsync/GoodSync use),
+- Change detection uses **size + modification time** (the same heuristic rsync uses),
   with a 2-second tolerance for network-volume timestamp rounding. Re-syncing an unchanged
   folder copies nothing.
 - The "remote" is just a path — point it at a local folder, an external disk under
@@ -88,7 +88,7 @@ file access — allow it.
 - `JobRunner.swift` — runs analyze/sync off the main thread with live progress + cancel.
 - `App.swift`, `ContentView.swift`, `JobDetailView.swift` — the SwiftUI interface.
 
-## Deliberately *not* included (kept simple vs. GoodSync)
+## Deliberately *not* included (kept simple)
 
 Block-level delta transfer, two-way sync / conflict resolution, cloud protocols
 (S3/FTP/SFTP/WebDAV), real-time folder monitoring, and the persistent file-state database.
