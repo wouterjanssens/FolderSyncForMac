@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a8dff"/>
+      <stop offset="1" stop-color="#0a63e6"/>
+    </linearGradient>
+    <linearGradient id="arrow1" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eaf3ff"/>
+    </linearGradient>
+    <filter id="folderShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000" flood-opacity="0.18"/>
+    </filter>
+    <filter id="dockShadow" x="-25%" y="-25%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="22" flood-color="#000" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <!-- native-style inset squircle with Dock shadow; artwork from concept 1 -->
+  <g transform="translate(72.53,72.53) scale(1.7167)">
+    <!-- squircle background -->
+    <rect x="16" y="16" width="480" height="480" rx="110" fill="url(#bg1)" filter="url(#dockShadow)"/>
+
+    <!-- SOURCE folder (left, solid white) -->
+    <g filter="url(#folderShadow)" transform="translate(70,170)">
+      <path d="M8 26 a20 20 0 0 1 20-20 h44 l20 26 h74 a20 20 0 0 1 20 20 v110 a20 20 0 0 1-20 20 H28 a20 20 0 0 1-20-20 Z"
+            fill="#ffffff"/>
+    </g>
+
+    <!-- DESTINATION folder (right, lighter / outlined) -->
+    <g transform="translate(296,170)">
+      <path d="M8 26 a20 20 0 0 1 20-20 h44 l20 26 h74 a20 20 0 0 1 20 20 v110 a20 20 0 0 1-20 20 H28 a20 20 0 0 1-20-20 Z"
+            fill="#ffffff" fill-opacity="0.30" stroke="#ffffff" stroke-width="9" stroke-opacity="0.85"/>
+    </g>
+
+    <!-- one-way arrow, center -->
+    <g transform="translate(186,232)">
+      <rect x="0" y="14" width="96" height="28" rx="14" fill="url(#arrow1)"/>
+      <path d="M88 -6 L150 28 L88 62 Z" fill="url(#arrow1)"/>
+    </g>
+
+    <!-- 'in sync' green dot, nudged onto the arrow start -->
+    <circle cx="200" cy="246" r="15" fill="#34c759" stroke="#0a63e6" stroke-width="5"/>
+  </g>
+</svg>

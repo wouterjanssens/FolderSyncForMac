@@ -22,6 +22,7 @@ rm -rf "${APP_BUNDLE}"
 mkdir -p "${CONTENTS}/MacOS" "${CONTENTS}/Resources"
 cp "${BIN_PATH}" "${CONTENTS}/MacOS/${APP_NAME}"
 cp Info.plist "${CONTENTS}/Info.plist"
+cp Icon/AppIcon.icns "${CONTENTS}/Resources/AppIcon.icns"
 printf 'APPL????' > "${CONTENTS}/PkgInfo"
 
 echo "==> Ad-hoc code signing…"
