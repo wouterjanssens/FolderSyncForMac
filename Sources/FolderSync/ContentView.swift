@@ -2,12 +2,20 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var store: JobStore
+    @EnvironmentObject var updater: UpdateChecker
 
     var body: some View {
         NavigationSplitView {
             sidebar
         } detail: {
             detail
+        }
+        .sheet(isPresented: Binding(
+            get: { updater.hasSomethingToShow },
+            set: { if !$0 { updater.dismiss() } }
+        )) {
+            UpdateView()
+                .environmentObject(updater)
         }
     }
 
