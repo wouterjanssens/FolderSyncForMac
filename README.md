@@ -15,6 +15,11 @@ but drops everything you don't need.
   remote it is **moved into a `_Deleted` folder** at the remote root, keeping its original
   subpath. So you always know what to clean up later, and nothing is ever truly lost.
   (Per-job, you can switch to "additive only" — never touch removed files.)
+- **Move detection:** if a file was simply renamed or relocated locally, FolderSync detects
+  it (same size + modification time, confirmed by a content hash) and **moves the existing
+  file on the remote** instead of re-copying it and quarantining the old copy. This avoids
+  re-transferring large files over the network for a rename. Detection runs only when the
+  deletion policy is "move to _Deleted".
 - Change detection uses **size + modification time** (the same heuristic rsync/GoodSync use),
   with a 2-second tolerance for network-volume timestamp rounding. Re-syncing an unchanged
   folder copies nothing.
@@ -26,7 +31,38 @@ but drops everything you don't need.
 - macOS 14+ (built and tested on macOS 26).
 - Swift toolchain (Command Line Tools is enough — **full Xcode is not required**).
 
-## Build & run
+## Download a prebuilt app
+
+You don't have to build it yourself — each release ships a ready-to-run app:
+
+1. Go to the [**Releases**](../../releases) page and download `FolderSync-<version>.zip`
+   from the latest release.
+2. Unzip it and move **FolderSync.app** to `/Applications`.
+3. **First launch:** because the app is ad-hoc signed (not notarized), macOS Gatekeeper
+   will flag it. Either right-click the app → **Open** → **Open**, or clear the download
+   quarantine once in Terminal:
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/FolderSync.app
+   ```
+
+> While the repo is private, downloading from a remote machine requires signing in to
+> GitHub (the same `wouterjanssens` account). If the repo is later made public, the release
+> zip is downloadable by anyone with no login.
+
+### Cutting a release
+
+A GitHub Actions workflow (`.github/workflows/release.yml`) builds the app on a macOS
+runner and attaches the zip to a release. Trigger it either way:
+
+```bash
+# Tag-driven: push a version tag and the release builds automatically.
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+…or from the GitHub UI: **Actions → "Build & Release" → Run workflow**, then enter a tag
+like `v1.0.0`. Both produce a downloadable release.
+
+## Build & run locally
 
 ```bash
 ./build.sh            # compiles and assembles FolderSync.app

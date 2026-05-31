@@ -1,0 +1,85 @@
+name: Build & Release
+
+# Two ways to trigger a build:
+#   1. Push a version tag:        git tag v1.0.0 && git push origin v1.0.0
+#   2. Run manually from GitHub:  Actions → "Build & Release" → Run workflow → enter a tag
+#
+# Either way you get a downloadable FolderSync-<version>.zip on the Releases page.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create (e.g. v1.0.0)"
+        required: true
+
+# Needed so the workflow can create the tag/release and upload the build.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building $TAG (version $VERSION)"
+
+      - name: Stamp version into Info.plist
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" Info.plist
+
+      - name: Build FolderSync.app
+        run: ./build.sh
+
+      - name: Package app into a zip
+        id: package
+        run: |
+          ZIP="FolderSync-${{ steps.version.outputs.version }}.zip"
+          # ditto preserves the bundle structure, resource forks, and code signature.
+          ditto -c -k --keepParent FolderSync.app "$ZIP"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FolderSync-${{ steps.version.outputs.version }}
+          path: ${{ steps.package.outputs.zip }}
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: FolderSync ${{ steps.version.outputs.version }}
+          files: ${{ steps.package.outputs.zip }}
+          generate_release_notes: true
+          body: |
+            ## FolderSync ${{ steps.version.outputs.version }}
+
+            Download `${{ steps.package.outputs.zip }}` below, unzip it, and move
+            **FolderSync.app** to your `/Applications` folder.
+
+            ### First launch (important)
+            This build is **ad-hoc signed**, so the first time you open it macOS
+            Gatekeeper will warn that it's from an unidentified developer. Either:
+
+            - **Right-click** FolderSync.app → **Open** → **Open**, or
+            - run once in Terminal to clear the download quarantine:
+              ```
+              xattr -dr com.apple.quarantine /Applications/FolderSync.app
+              ```
+
+            Requires macOS 14 or later.

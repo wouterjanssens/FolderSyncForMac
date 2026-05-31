@@ -160,7 +160,7 @@ struct JobDetailView: View {
                           systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                 }
-                Text("Copied \(result.created) new, updated \(result.updated), moved \(result.deletedMoved) to _Deleted, created \(result.dirsCreated) folders — \(Format.bytes(result.bytesCopied)).")
+                Text("Copied \(result.created) new, relocated \(result.moved), updated \(result.updated), moved \(result.deletedMoved) to _Deleted, created \(result.dirsCreated) folders — \(Format.bytes(result.bytesCopied)) copied.")
                     .font(.callout).foregroundStyle(.secondary)
 
                 if !result.errors.isEmpty {
@@ -206,6 +206,7 @@ struct JobDetailView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 16) {
                         summaryBadge(count: plan.createCount, label: "New", color: .green, symbol: "plus.circle.fill")
+                        summaryBadge(count: plan.moveCount, label: "Moved", color: .purple, symbol: "arrow.left.arrow.right.circle.fill")
                         summaryBadge(count: plan.updateCount, label: "Changed", color: .blue, symbol: "arrow.triangle.2.circlepath.circle.fill")
                         summaryBadge(count: plan.deleteCount, label: "Removed", color: .orange, symbol: "trash.circle.fill")
                         Spacer()
@@ -240,11 +241,17 @@ struct JobDetailView: View {
                         HStack(spacing: 8) {
                             Image(systemName: item.action.symbol)
                                 .foregroundStyle(color(for: item.action))
-                            Text(item.relativePath + (item.isDirectory ? "/" : ""))
-                                .font(.system(.caption, design: .monospaced))
-                                .lineLimit(1).truncationMode(.middle)
+                            if item.action == .move, let from = item.fromPath {
+                                Text("\(from)  →  \(item.relativePath)")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .lineLimit(1).truncationMode(.middle)
+                            } else {
+                                Text(item.relativePath + (item.isDirectory ? "/" : ""))
+                                    .font(.system(.caption, design: .monospaced))
+                                    .lineLimit(1).truncationMode(.middle)
+                            }
                             Spacer()
-                            if !item.isDirectory && item.action != .delete {
+                            if !item.isDirectory && item.action != .delete && item.action != .move {
                                 Text(Format.bytes(item.size))
                                     .font(.caption2).foregroundStyle(.secondary)
                             }
@@ -266,6 +273,7 @@ struct JobDetailView: View {
     private func color(for action: SyncAction) -> Color {
         switch action {
         case .create: return .green
+        case .move:   return .purple
         case .update: return .blue
         case .delete: return .orange
         }
