@@ -13,14 +13,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct FolderSyncApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = JobStore()
+    @StateObject private var updater = UpdateChecker()
 
     var body: some Scene {
         WindowGroup("FolderSync") {
             ContentView()
                 .environmentObject(store)
+                .environmentObject(updater)
                 .frame(minWidth: 820, minHeight: 520)
+                // Check for updates once each launch. A cancelled prompt isn't
+                // remembered, so the next launch checks again.
+                .task { await updater.checkForUpdates(silent: true) }
         }
         .windowResizability(.contentMinSize)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    Task { await updater.checkForUpdates(silent: false) }
+                }
+            }
+        }
     }
 }
 
