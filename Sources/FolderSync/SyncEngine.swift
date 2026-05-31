@@ -209,12 +209,28 @@ struct SyncEngine {
         let totalBytes = plan.bytesToCopy
         var done = 0
 
-        func report(_ file: String) {
-            progress(SyncProgress(currentFile: file,
+        let meter = ThroughputMeter()
+        var lastEmit = Date.distantPast
+
+        func report(phase: String, file: String, force: Bool) {
+            let now = Date()
+            meter.record(bytes: result.bytesCopied, at: now)
+            guard force || now.timeIntervalSince(lastEmit) >= 0.12 else { return }
+            lastEmit = now
+            let avg = meter.averageSpeed(at: now)
+            let cur = meter.currentSpeed
+            let speedForETA = cur > 0 ? cur : avg
+            let remaining = max(0, totalBytes - result.bytesCopied)
+            let eta: Double? = speedForETA > 0 ? Double(remaining) / speedForETA : nil
+            progress(SyncProgress(phase: phase,
+                                  currentFile: file,
                                   doneItems: done,
                                   totalItems: totalItems,
                                   bytesCopied: result.bytesCopied,
-                                  totalBytes: totalBytes))
+                                  totalBytes: totalBytes,
+                                  currentSpeed: cur,
+                                  averageSpeed: avg,
+                                  etaSeconds: eta))
         }
 
         // 1. Create directories first, shallowest first.
@@ -231,7 +247,7 @@ struct SyncEngine {
                 result.errors.append("Create folder \(item.relativePath): \(error.localizedDescription)")
             }
             done += 1
-            report(item.relativePath)
+            report(phase: "Creating folders", file: item.relativePath, force: false)
         }
 
         // 2. Relocate moved files within the remote (no re-copy). If the move
@@ -250,18 +266,25 @@ struct SyncEngine {
                 // Fall back to a fresh copy from the local source.
                 let localSrc = local.appendingPathComponent(item.relativePath)
                 do {
-                    try fm.copyItem(at: localSrc, to: dst)
+                    try copyFile(from: localSrc, to: dst, size: item.size, fm: fm,
+                                 onProgress: { delta in
+                                     result.bytesCopied += delta
+                                     report(phase: "Copying", file: item.relativePath, force: false)
+                                 }, isCancelled: isCancelled)
                     result.created += 1
-                    result.bytesCopied += item.size
+                } catch is CancellationError {
+                    try? fm.removeItem(at: dst)
+                    result.cancelled = true
+                    return result
                 } catch {
                     result.errors.append("Move \(from) → \(item.relativePath): \(error.localizedDescription)")
                 }
             }
             done += 1
-            report(item.relativePath)
+            report(phase: "Moving files", file: item.relativePath, force: true)
         }
 
-        // 3. Copy new and changed files.
+        // 3. Copy new and changed files (streamed, with live byte progress).
         for item in plan.items where !item.isDirectory && (item.action == .create || item.action == .update) {
             if isCancelled() { result.cancelled = true; return result }
             let src = local.appendingPathComponent(item.relativePath)
@@ -269,14 +292,21 @@ struct SyncEngine {
             do {
                 try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
                 if fm.fileExists(atPath: dst.path) { try fm.removeItem(at: dst) }
-                try fm.copyItem(at: src, to: dst)
+                try copyFile(from: src, to: dst, size: item.size, fm: fm,
+                             onProgress: { delta in
+                                 result.bytesCopied += delta
+                                 report(phase: "Copying", file: item.relativePath, force: false)
+                             }, isCancelled: isCancelled)
                 if item.action == .create { result.created += 1 } else { result.updated += 1 }
-                result.bytesCopied += item.size
+            } catch is CancellationError {
+                try? fm.removeItem(at: dst)
+                result.cancelled = true
+                return result
             } catch {
                 result.errors.append("Copy \(item.relativePath): \(error.localizedDescription)")
             }
             done += 1
-            report(item.relativePath)
+            report(phase: "Copying", file: item.relativePath, force: true)
         }
 
         // 4. Move orphaned remote files into _Deleted, preserving subpath.
@@ -293,11 +323,62 @@ struct SyncEngine {
                 result.errors.append("Move to _Deleted \(item.relativePath): \(error.localizedDescription)")
             }
             done += 1
-            report(item.relativePath)
+            report(phase: "Cleaning up removed files", file: item.relativePath, force: true)
         }
 
-        report("")
+        report(phase: "Done", file: "", force: true)
         return result
+    }
+
+    /// Files at or above this size are streamed in chunks so progress and
+    /// speed update mid-transfer (important over the network). Smaller files
+    /// use FileManager's one-shot copy, which preserves all metadata.
+    private static let streamThreshold: Int64 = 8 * 1024 * 1024   // 8 MB
+    private static let chunkSize = 4 * 1024 * 1024                 // 4 MB
+
+    /// Copy a single file. `onProgress` is called with the number of bytes
+    /// written since the previous call. Throws `CancellationError` if
+    /// `isCancelled()` becomes true mid-transfer.
+    private func copyFile(from src: URL, to dst: URL, size: Int64, fm: FileManager,
+                          onProgress: (Int64) -> Void, isCancelled: () -> Bool) throws {
+        guard size >= SyncEngine.streamThreshold else {
+            try fm.copyItem(at: src, to: dst)
+            onProgress(size)
+            return
+        }
+
+        guard let input = try? FileHandle(forReadingFrom: src) else {
+            // Fall back to a plain copy if we cannot open a stream.
+            try fm.copyItem(at: src, to: dst)
+            onProgress(size)
+            return
+        }
+        defer { try? input.close() }
+
+        guard fm.createFile(atPath: dst.path, contents: nil),
+              let output = try? FileHandle(forWritingTo: dst) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        defer { try? output.close() }
+
+        while true {
+            if isCancelled() { throw CancellationError() }
+            let chunk: Data? = autoreleasepool {
+                (try? input.read(upToCount: SyncEngine.chunkSize)) ?? nil
+            }
+            guard let chunk, !chunk.isEmpty else { break }
+            try output.write(contentsOf: chunk)
+            onProgress(Int64(chunk.count))
+        }
+
+        // Preserve modification date and permissions so re-sync change detection
+        // and move detection keep working as if FileManager had copied it.
+        if let attrs = try? fm.attributesOfItem(atPath: src.path) {
+            var restore: [FileAttributeKey: Any] = [:]
+            if let mdate = attrs[.modificationDate] { restore[.modificationDate] = mdate }
+            if let perms = attrs[.posixPermissions] { restore[.posixPermissions] = perms }
+            if !restore.isEmpty { try? fm.setAttributes(restore, ofItemAtPath: dst.path) }
+        }
     }
 
     /// True if both files have byte-identical content. Used to confirm a
@@ -342,5 +423,35 @@ struct SyncEngine {
             result = dir.appendingPathComponent(ext.isEmpty ? candidate : "\(candidate).\(ext)")
         }
         return result
+    }
+}
+
+/// Tracks copy throughput: a whole-session average plus a recent-window
+/// "current" speed. Fed cumulative byte counts as the sync progresses.
+final class ThroughputMeter {
+    private let start = Date()
+    private var window: [(t: Date, bytes: Int64)] = []
+    private let windowDuration: TimeInterval = 3
+
+    func record(bytes: Int64, at now: Date) {
+        window.append((now, bytes))
+        let cutoff = now.addingTimeInterval(-windowDuration)
+        while window.count > 2, let first = window.first, first.t < cutoff {
+            window.removeFirst()
+        }
+    }
+
+    func averageSpeed(at now: Date) -> Double {
+        guard let last = window.last else { return 0 }
+        let elapsed = now.timeIntervalSince(start)
+        return elapsed > 0 ? Double(last.bytes) / elapsed : 0
+    }
+
+    /// Bytes/second over the most recent window.
+    var currentSpeed: Double {
+        guard let first = window.first, let last = window.last else { return 0 }
+        let dt = last.t.timeIntervalSince(first.t)
+        let db = last.bytes - first.bytes
+        return dt > 0 ? Double(db) / dt : 0
     }
 }

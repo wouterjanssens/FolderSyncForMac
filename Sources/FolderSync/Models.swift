@@ -103,14 +103,21 @@ struct SyncPlan {
 
 /// Live progress emitted while a sync runs.
 struct SyncProgress {
-    var currentFile: String
-    var doneItems: Int
-    var totalItems: Int
-    var bytesCopied: Int64
-    var totalBytes: Int64
+    var phase: String = ""
+    var currentFile: String = ""
+    var doneItems: Int = 0
+    var totalItems: Int = 0
+    var bytesCopied: Int64 = 0
+    var totalBytes: Int64 = 0
+    var currentSpeed: Double = 0   // bytes / second, recent window
+    var averageSpeed: Double = 0   // bytes / second, whole session
+    var etaSeconds: Double? = nil
 
+    /// Primary bar position. Byte-based when there is data to copy; otherwise
+    /// falls back to item count (e.g. a job that is only moves/deletes).
     var fraction: Double {
-        totalItems == 0 ? 1 : min(1, Double(doneItems) / Double(totalItems))
+        if totalBytes > 0 { return min(1, Double(bytesCopied) / Double(totalBytes)) }
+        return totalItems == 0 ? 1 : min(1, Double(doneItems) / Double(totalItems))
     }
 }
 

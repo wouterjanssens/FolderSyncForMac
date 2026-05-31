@@ -42,4 +42,22 @@ enum Format {
     static func bytes(_ value: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: value, countStyle: .file)
     }
+
+    /// Bytes-per-second as a human MB/s-style rate.
+    static func speed(_ bytesPerSecond: Double) -> String {
+        guard bytesPerSecond.isFinite, bytesPerSecond > 0 else { return "—" }
+        return bytes(Int64(bytesPerSecond)) + "/s"
+    }
+
+    /// Seconds as a compact duration, e.g. "1h 04m", "3m 12s", "8s".
+    static func duration(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "—" }
+        let s = Int(seconds.rounded())
+        if s >= 3600 {
+            return "\(s / 3600)h \(String(format: "%02dm", (s % 3600) / 60))"
+        } else if s >= 60 {
+            return "\(s / 60)m \(String(format: "%02ds", s % 60))"
+        }
+        return "\(s)s"
+    }
 }

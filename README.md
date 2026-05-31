@@ -7,10 +7,13 @@ but drops everything you don't need.
 ## What it does
 
 - Define any number of **jobs**, each a named *local folder → remote folder* pair.
-- **Analyze** a job to preview exactly what would change: new files, changed files, and
-  removed files, plus the total bytes to copy. Nothing is touched yet.
+- **Analyze** a job to preview exactly what would change, **grouped by folder**: each folder
+  is collapsible and shows its own counts (new / moved / changed / removed) and the amount of
+  data to copy, with per-file sizes inside. A grand total sits at the top. Nothing is touched yet.
 - **Run Sync** to execute the previewed plan. Sync is strictly one-way (local → remote);
-  the local source is never modified.
+  the local source is never modified. A **byte-based progress bar** shows percent complete,
+  **current and average speed (MB/s)**, and an **estimated time remaining** — large files are
+  streamed in chunks so progress keeps moving mid-transfer, which matters most over the network.
 - **Safe deletions:** when a file no longer exists locally, instead of deleting it on the
   remote it is **moved into a `_Deleted` folder** at the remote root, keeping its original
   subpath. So you always know what to clean up later, and nothing is ever truly lost.
