@@ -129,18 +129,48 @@ struct JobDetailView: View {
             }
 
             if runner.isSyncing, let p = runner.progress {
-                VStack(alignment: .leading, spacing: 4) {
-                    ProgressView(value: p.fraction)
-                    HStack {
-                        Text("\(p.doneItems) / \(p.totalItems)")
-                        Spacer()
-                        Text(Format.bytes(p.bytesCopied) + " of " + Format.bytes(p.totalBytes))
+                progressPanel(p)
+            }
+        }
+    }
+
+    private func progressPanel(_ p: SyncProgress) -> some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                ProgressView(value: p.fraction)
+                HStack {
+                    Text("\(Int(p.fraction * 100))%").fontWeight(.semibold)
+                    Text("·")
+                    Text(Format.bytes(p.bytesCopied) + " of " + Format.bytes(p.totalBytes))
+                    Spacer()
+                    Text("\(p.doneItems) / \(p.totalItems) items")
+                }
+                .font(.callout).foregroundStyle(.secondary)
+
+                HStack(spacing: 18) {
+                    Label(Format.speed(p.currentSpeed), systemImage: "speedometer")
+                        .help("Current speed (recent average)")
+                    Label("avg " + Format.speed(p.averageSpeed), systemImage: "chart.line.uptrend.xyaxis")
+                        .help("Average speed over the whole session")
+                    Spacer()
+                    if let eta = p.etaSeconds {
+                        Label("~" + Format.duration(eta) + " left", systemImage: "clock")
                     }
-                    .font(.caption).foregroundStyle(.secondary)
-                    Text(p.currentFile).font(.caption2).foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.middle)
+                }
+                .font(.caption).foregroundStyle(.secondary)
+
+                HStack(spacing: 6) {
+                    Text(p.phase).font(.caption.weight(.semibold))
+                    if !p.currentFile.isEmpty {
+                        Text(p.currentFile)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(6)
         }
     }
 
@@ -232,39 +262,21 @@ struct JobDetailView: View {
     }
 
     private func planList(_ plan: SyncPlan) -> some View {
-        let cap = 2000
-        let shown = Array(plan.items.prefix(cap))
+        let groups = FolderGroup.build(from: plan.items)
+        let cap = 400
+        let shown = Array(groups.prefix(cap))
         return VStack(alignment: .leading, spacing: 0) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(shown) { item in
-                        HStack(spacing: 8) {
-                            Image(systemName: item.action.symbol)
-                                .foregroundStyle(color(for: item.action))
-                            if item.action == .move, let from = item.fromPath {
-                                Text("\(from)  →  \(item.relativePath)")
-                                    .font(.system(.caption, design: .monospaced))
-                                    .lineLimit(1).truncationMode(.middle)
-                            } else {
-                                Text(item.relativePath + (item.isDirectory ? "/" : ""))
-                                    .font(.system(.caption, design: .monospaced))
-                                    .lineLimit(1).truncationMode(.middle)
-                            }
-                            Spacer()
-                            if !item.isDirectory && item.action != .delete && item.action != .move {
-                                Text(Format.bytes(item.size))
-                                    .font(.caption2).foregroundStyle(.secondary)
-                            }
-                        }
-                        .padding(.vertical, 2)
-                        Divider().opacity(0.3)
+                    ForEach(shown) { group in
+                        FolderGroupView(group: group, color: color(for:))
                     }
                 }
                 .padding(.trailing, 6)
             }
-            .frame(height: 280)
-            if plan.items.count > cap {
-                Text("Showing first \(cap) of \(plan.items.count) items. Sync still processes all of them.")
+            .frame(height: 320)
+            if groups.count > cap {
+                Text("Showing first \(cap) of \(groups.count) folders. Sync still processes all of them.")
                     .font(.caption2).foregroundStyle(.secondary).padding(.top, 4)
             }
         }
@@ -277,5 +289,131 @@ struct JobDetailView: View {
         case .update: return .blue
         case .delete: return .orange
         }
+    }
+}
+
+// MARK: - Folder grouping
+
+/// Plan items grouped by their containing folder, with per-folder subtotals.
+struct FolderGroup: Identifiable {
+    let folder: String          // "" == remote root
+    var items: [PlanItem]
+    var copyBytes: Int64
+    var newCount: Int
+    var movedCount: Int
+    var changedCount: Int
+    var removedCount: Int
+
+    var id: String { folder }
+    var displayName: String { folder.isEmpty ? "(root)" : folder }
+
+    static func build(from items: [PlanItem]) -> [FolderGroup] {
+        var buckets: [String: FolderGroup] = [:]
+        for item in items {
+            let folder = (item.relativePath as NSString).deletingLastPathComponent
+            var g = buckets[folder] ?? FolderGroup(folder: folder, items: [], copyBytes: 0,
+                                                   newCount: 0, movedCount: 0,
+                                                   changedCount: 0, removedCount: 0)
+            g.items.append(item)
+            switch item.action {
+            case .create:
+                if !item.isDirectory { g.newCount += 1; g.copyBytes += item.size }
+            case .move:    g.movedCount += 1
+            case .update:  g.changedCount += 1; g.copyBytes += item.size
+            case .delete:  g.removedCount += 1
+            }
+            buckets[folder] = g
+        }
+        for key in buckets.keys {
+            buckets[key]!.items.sort {
+                ($0.action.sortRank, $0.relativePath.lowercased())
+                    < ($1.action.sortRank, $1.relativePath.lowercased())
+            }
+        }
+        return buckets.values.sorted { $0.folder.lowercased() < $1.folder.lowercased() }
+    }
+}
+
+/// A collapsible folder section showing its files and a subtotal.
+struct FolderGroupView: View {
+    let group: FolderGroup
+    let color: (SyncAction) -> Color
+    @State private var expanded = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.12)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2).foregroundStyle(.secondary).frame(width: 10)
+                    Image(systemName: "folder.fill").foregroundStyle(.secondary)
+                    Text(group.displayName)
+                        .font(.system(.caption, design: .monospaced).weight(.semibold))
+                        .lineLimit(1).truncationMode(.head)
+                    Spacer()
+                    countPills
+                    if group.copyBytes > 0 {
+                        Text(Format.bytes(group.copyBytes))
+                            .font(.caption.weight(.medium))
+                            .padding(.leading, 4)
+                    }
+                }
+                .padding(.vertical, 3)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                ForEach(group.items) { item in
+                    fileRow(item)
+                        .padding(.leading, 26)
+                }
+            }
+            Divider().opacity(0.4)
+        }
+    }
+
+    private var countPills: some View {
+        HStack(spacing: 8) {
+            if group.newCount > 0 { pill(group.newCount, .green) }
+            if group.movedCount > 0 { pill(group.movedCount, .purple) }
+            if group.changedCount > 0 { pill(group.changedCount, .blue) }
+            if group.removedCount > 0 { pill(group.removedCount, .orange) }
+        }
+    }
+
+    private func pill(_ n: Int, _ c: Color) -> some View {
+        Text("\(n)")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(c)
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(c.opacity(0.15), in: Capsule())
+    }
+
+    private func fileRow(_ item: PlanItem) -> some View {
+        let name = (item.relativePath as NSString).lastPathComponent
+        return HStack(spacing: 8) {
+            Image(systemName: item.action.symbol)
+                .foregroundStyle(color(item.action))
+                .font(.caption)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name + (item.isDirectory ? "/" : ""))
+                    .font(.system(.caption, design: .monospaced))
+                    .lineLimit(1).truncationMode(.middle)
+                if item.action == .move, let from = item.fromPath {
+                    Text("from " + from)
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.head)
+                }
+            }
+            Spacer()
+            if !item.isDirectory {
+                Text(Format.bytes(item.size))
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 1)
     }
 }
