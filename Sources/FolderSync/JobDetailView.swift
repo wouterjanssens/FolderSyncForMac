@@ -124,13 +124,45 @@ struct JobDetailView: View {
 
                 if runner.isAnalyzing {
                     ProgressView().controlSize(.small)
-                    Text("Analyzing…").foregroundStyle(.secondary)
                 }
+            }
+
+            if runner.isAnalyzing, let a = runner.analyzeProgress {
+                analyzePanel(a)
             }
 
             if runner.isSyncing, let p = runner.progress {
                 progressPanel(p)
             }
+        }
+    }
+
+    private func analyzePanel(_ a: AnalyzeProgress) -> some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                if let fraction = a.fraction {
+                    ProgressView(value: fraction)
+                } else {
+                    ProgressView().progressViewStyle(.linear)   // indeterminate while scanning
+                }
+                HStack {
+                    Text(a.phase).font(.callout.weight(.semibold))
+                    Spacer()
+                    if a.total > 0 {
+                        Text("\(a.checked) / \(a.total)").font(.callout).foregroundStyle(.secondary)
+                    } else if a.filesSeen > 0 {
+                        Text("\(a.filesSeen) items").font(.callout).foregroundStyle(.secondary)
+                    }
+                }
+                if !a.currentFile.isEmpty {
+                    Text(a.currentFile)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(6)
         }
     }
 

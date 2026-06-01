@@ -101,6 +101,16 @@ struct SyncPlan {
     var isEmpty: Bool { items.isEmpty }
 }
 
+/// Live progress emitted while an analysis runs.
+struct AnalyzeProgress {
+    var phase: String = ""
+    var filesSeen: Int = 0          // running count during a scan
+    var checked: Int = 0            // move-detection: candidates examined
+    var total: Int = 0              // move-detection: candidates to examine
+    var currentFile: String = ""
+    var fraction: Double? = nil     // nil => indeterminate (unknown total)
+}
+
 /// Live progress emitted while a sync runs.
 struct SyncProgress {
     var phase: String = ""
