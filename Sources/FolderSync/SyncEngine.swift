@@ -19,9 +19,11 @@ struct SyncEngine {
     /// (used to ignore the remote `_Deleted` folder).
     func scan(root: URL,
               excludes: Set<String>,
-              skipTopLevel: String? = nil) -> (files: [String: FileEntry], errors: [String]) {
+              skipTopLevel: String? = nil,
+              onProgress: ((Int, String) -> Void)? = nil) -> (files: [String: FileEntry], errors: [String]) {
         var map: [String: FileEntry] = [:]
         var errors: [String] = []
+        var lastScanEmit = Date.distantPast
         let fm = FileManager.default
         let keys: Set<URLResourceKey> = [
             .isDirectoryKey, .fileSizeKey, .contentModificationDateKey, .isRegularFileKey
@@ -67,14 +69,23 @@ struct SyncEngine {
             let size = Int64(values?.fileSize ?? 0)
             let mtime = values?.contentModificationDate ?? .distantPast
             map[rel] = FileEntry(relativePath: rel, size: size, mtime: mtime, isDirectory: isDir)
+
+            if let onProgress {
+                let now = Date()
+                if now.timeIntervalSince(lastScanEmit) >= 0.1 {
+                    lastScanEmit = now
+                    onProgress(map.count, rel)
+                }
+            }
         }
 
+        onProgress?(map.count, "")
         return (map, errors)
     }
 
     // MARK: - Analysis
 
-    func analyze(job: SyncJob) -> SyncPlan {
+    func analyze(job: SyncJob, progress: ((AnalyzeProgress) -> Void)? = nil) -> SyncPlan {
         let fm = FileManager.default
         let localRoot = URL(fileURLWithPath: job.localPath, isDirectory: true)
         let remoteRoot = URL(fileURLWithPath: job.remotePath, isDirectory: true)
@@ -92,9 +103,15 @@ struct SyncEngine {
         }
 
         let excludes = Set(job.excludes)
-        let (localMap, localErrors) = scan(root: localRoot, excludes: excludes)
+        progress?(AnalyzeProgress(phase: "Scanning local folder…"))
+        let (localMap, localErrors) = scan(root: localRoot, excludes: excludes) { count, file in
+            progress?(AnalyzeProgress(phase: "Scanning local folder…", filesSeen: count, currentFile: file))
+        }
+        progress?(AnalyzeProgress(phase: "Scanning remote folder…"))
         let (remoteMap, remoteErrors) = scan(root: remoteRoot, excludes: excludes,
-                                             skipTopLevel: SyncEngine.deletedFolderName)
+                                             skipTopLevel: SyncEngine.deletedFolderName) { count, file in
+            progress?(AnalyzeProgress(phase: "Scanning remote folder…", filesSeen: count, currentFile: file))
+        }
         errors.append(contentsOf: localErrors)
         errors.append(contentsOf: remoteErrors)
 
@@ -146,7 +163,21 @@ struct SyncEngine {
             for entry in deleteCandidates {
                 deletesBySize[entry.size, default: []].append(entry)
             }
+            let moveTotal = createCandidates.count
+            var moveChecked = 0
+            var lastMoveEmit = Date.distantPast
             for localEntry in createCandidates {
+                moveChecked += 1
+                if let progress {
+                    let now = Date()
+                    if now.timeIntervalSince(lastMoveEmit) >= 0.1 || moveChecked == moveTotal {
+                        lastMoveEmit = now
+                        progress(AnalyzeProgress(phase: "Checking for moved files…",
+                                                 checked: moveChecked, total: moveTotal,
+                                                 currentFile: localEntry.relativePath,
+                                                 fraction: moveTotal > 0 ? Double(moveChecked) / Double(moveTotal) : nil))
+                    }
+                }
                 guard var bucket = deletesBySize[localEntry.size], !bucket.isEmpty else {
                     items.append(PlanItem(action: .create, relativePath: localEntry.relativePath,
                                           size: localEntry.size, isDirectory: false))

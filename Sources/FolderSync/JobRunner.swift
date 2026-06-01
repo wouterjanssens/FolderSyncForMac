@@ -17,6 +17,7 @@ final class JobRunner: ObservableObject {
     @Published var isAnalyzing = false
     @Published var isSyncing = false
     @Published var progress: SyncProgress?
+    @Published var analyzeProgress: AnalyzeProgress?
     @Published var result: SyncResult?
 
     private let engine = SyncEngine()
@@ -32,12 +33,16 @@ final class JobRunner: ObservableObject {
         isAnalyzing = true
         result = nil
         plan = nil
+        analyzeProgress = AnalyzeProgress(phase: "Starting…")
         let engine = engine
         DispatchQueue.global(qos: .userInitiated).async {
-            let plan = engine.analyze(job: job)
+            let plan = engine.analyze(job: job, progress: { ap in
+                DispatchQueue.main.async { self.analyzeProgress = ap }
+            })
             DispatchQueue.main.async {
                 self.plan = plan
                 self.isAnalyzing = false
+                self.analyzeProgress = nil
             }
         }
     }
