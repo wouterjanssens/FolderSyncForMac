@@ -19,14 +19,34 @@ final class JobRunner: ObservableObject {
     @Published var progress: SyncProgress?
     @Published var analyzeProgress: AnalyzeProgress?
     @Published var result: SyncResult?
+    /// IDs of plan items the user wants to include in the next sync.
+    /// Everything is included by default after an analysis.
+    @Published var includedIDs: Set<UUID> = []
 
     private let engine = SyncEngine()
     private let cancelFlag = AtomicBool(false)
 
     var canSync: Bool {
         guard let plan else { return false }
-        return !plan.isEmpty && plan.errors.isEmpty && !isSyncing && !isAnalyzing
+        return plan.errors.isEmpty && !includedIDs.isEmpty && !isSyncing && !isAnalyzing
     }
+
+    // MARK: Selection
+
+    func isIncluded(_ item: PlanItem) -> Bool { includedIDs.contains(item.id) }
+
+    func toggle(_ item: PlanItem) {
+        if includedIDs.contains(item.id) { includedIDs.remove(item.id) }
+        else { includedIDs.insert(item.id) }
+    }
+
+    func setIncluded(_ items: [PlanItem], _ on: Bool) {
+        if on { includedIDs.formUnion(items.map(\.id)) }
+        else { includedIDs.subtract(items.map(\.id)) }
+    }
+
+    /// Items from the current plan that are currently included.
+    var includedItems: [PlanItem] { plan?.items.filter { includedIDs.contains($0.id) } ?? [] }
 
     func analyze(job: SyncJob) {
         guard !isAnalyzing && !isSyncing else { return }
@@ -41,6 +61,7 @@ final class JobRunner: ObservableObject {
             })
             DispatchQueue.main.async {
                 self.plan = plan
+                self.includedIDs = Set(plan.items.map(\.id))   // everything checked by default
                 self.isAnalyzing = false
                 self.analyzeProgress = nil
             }
@@ -49,6 +70,11 @@ final class JobRunner: ObservableObject {
 
     func sync(job: SyncJob) {
         guard let plan, canSync else { return }
+        // Only sync the items the user left checked.
+        let filtered = SyncPlan(jobID: plan.jobID,
+                                items: plan.items.filter { includedIDs.contains($0.id) },
+                                errors: plan.errors)
+        guard !filtered.items.isEmpty else { return }
         isSyncing = true
         result = nil
         cancelFlag.set(false)
@@ -57,7 +83,7 @@ final class JobRunner: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             let result = engine.execute(
                 job: job,
-                plan: plan,
+                plan: filtered,
                 progress: { p in DispatchQueue.main.async { self.progress = p } },
                 isCancelled: { flag.value }
             )
@@ -66,6 +92,7 @@ final class JobRunner: ObservableObject {
                 self.isSyncing = false
                 self.progress = nil
                 self.plan = nil
+                self.includedIDs = []
             }
         }
     }
@@ -76,5 +103,6 @@ final class JobRunner: ObservableObject {
         plan = nil
         result = nil
         progress = nil
+        includedIDs = []
     }
 }
