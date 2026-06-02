@@ -264,25 +264,55 @@ struct JobDetailView: View {
                     .padding(6)
             }
         } else {
+            let sel = plan.items.filter { runner.includedIDs.contains($0.id) }
+            let selFiles = sel.filter { !$0.isDirectory }.count
+            let allFiles = plan.items.filter { !$0.isDirectory }.count
+            let selBytes = sel.filter { ($0.action == .create || $0.action == .update) && !$0.isDirectory }
+                .reduce(Int64(0)) { $0 + $1.size }
             GroupBox {
                 VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 16) {
-                        summaryBadge(count: plan.createCount, label: "New", color: .green, symbol: "plus.circle.fill")
-                        summaryBadge(count: plan.moveCount, label: "Moved", color: .purple, symbol: "arrow.left.arrow.right.circle.fill")
-                        summaryBadge(count: plan.updateCount, label: "Changed", color: .blue, symbol: "arrow.triangle.2.circlepath.circle.fill")
-                        summaryBadge(count: plan.deleteCount, label: "Removed", color: .orange, symbol: "trash.circle.fill")
+                    HStack(spacing: 14) {
+                        Button {
+                            let allSelected = sel.count == plan.items.count
+                            runner.setIncluded(plan.items, !allSelected)
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: Self.checkboxSymbol(selected: sel.count, total: plan.items.count))
+                                Text("All")
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help("Check or uncheck every file")
+
+                        summaryBadge(count: sel.filter { $0.action == .create && !$0.isDirectory }.count,
+                                     label: "New", color: .green, symbol: "plus.circle.fill")
+                        summaryBadge(count: sel.filter { $0.action == .move }.count,
+                                     label: "Moved", color: .purple, symbol: "arrow.left.arrow.right.circle.fill")
+                        summaryBadge(count: sel.filter { $0.action == .update }.count,
+                                     label: "Changed", color: .blue, symbol: "arrow.triangle.2.circlepath.circle.fill")
+                        summaryBadge(count: sel.filter { $0.action == .delete }.count,
+                                     label: "Removed", color: .orange, symbol: "trash.circle.fill")
                         Spacer()
-                        Text("To copy: \(Format.bytes(plan.bytesToCopy))")
-                            .font(.callout.weight(.medium))
+                        VStack(alignment: .trailing, spacing: 1) {
+                            Text("To copy: \(Format.bytes(selBytes))").font(.callout.weight(.medium))
+                            Text("\(selFiles) of \(allFiles) files selected")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
                     }
                     Divider()
                     planList(plan)
                 }
                 .padding(6)
             } label: {
-                Label("Analysis — preview of changes", systemImage: "list.bullet.rectangle")
+                Label("Analysis — choose what to sync", systemImage: "checklist")
             }
         }
+    }
+
+    static func checkboxSymbol(selected: Int, total: Int) -> String {
+        if total == 0 || selected == 0 { return "square" }
+        if selected == total { return "checkmark.square.fill" }
+        return "minus.square.fill"
     }
 
     private func summaryBadge(count: Int, label: String, color: Color, symbol: String) -> some View {
@@ -301,7 +331,7 @@ struct JobDetailView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(shown) { group in
-                        FolderGroupView(group: group, color: color(for:))
+                        FolderGroupView(group: group, color: color(for:), runner: runner)
                     }
                 }
                 .padding(.trailing, 6)
@@ -370,37 +400,54 @@ struct FolderGroup: Identifiable {
 struct FolderGroupView: View {
     let group: FolderGroup
     let color: (SyncAction) -> Color
+    @ObservedObject var runner: JobRunner
     @State private var expanded = true
+
+    private var selectedInFolder: Int { group.items.filter { runner.isIncluded($0) }.count }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.12)) { expanded.toggle() }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.caption2).foregroundStyle(.secondary).frame(width: 10)
-                    Image(systemName: "folder.fill").foregroundStyle(.secondary)
-                    Text(group.displayName)
-                        .font(.system(.caption, design: .monospaced).weight(.semibold))
-                        .lineLimit(1).truncationMode(.head)
-                    Spacer()
-                    countPills
-                    if group.copyBytes > 0 {
-                        Text(Format.bytes(group.copyBytes))
-                            .font(.caption.weight(.medium))
-                            .padding(.leading, 4)
-                    }
+            HStack(spacing: 6) {
+                // Folder include checkbox (tri-state).
+                Button {
+                    let allOn = selectedInFolder == group.items.count
+                    runner.setIncluded(group.items, !allOn)
+                } label: {
+                    Image(systemName: JobDetailView.checkboxSymbol(selected: selectedInFolder,
+                                                                   total: group.items.count))
+                        .foregroundStyle(selectedInFolder == 0 ? Color.secondary : Color.accentColor)
                 }
-                .padding(.vertical, 3)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .help("Check or uncheck this whole folder")
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.12)) { expanded.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.caption2).foregroundStyle(.secondary).frame(width: 10)
+                        Image(systemName: "folder.fill").foregroundStyle(.secondary)
+                        Text(group.displayName)
+                            .font(.system(.caption, design: .monospaced).weight(.semibold))
+                            .lineLimit(1).truncationMode(.head)
+                        Spacer()
+                        countPills
+                        if group.copyBytes > 0 {
+                            Text(Format.bytes(group.copyBytes))
+                                .font(.caption.weight(.medium))
+                                .padding(.leading, 4)
+                        }
+                    }
+                    .padding(.vertical, 3)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
 
             if expanded {
                 ForEach(group.items) { item in
                     fileRow(item)
-                        .padding(.leading, 26)
+                        .padding(.leading, 24)
                 }
             }
             Divider().opacity(0.4)
@@ -426,7 +473,15 @@ struct FolderGroupView: View {
 
     private func fileRow(_ item: PlanItem) -> some View {
         let name = (item.relativePath as NSString).lastPathComponent
+        let included = runner.isIncluded(item)
         return HStack(spacing: 8) {
+            Button { runner.toggle(item) } label: {
+                Image(systemName: included ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(included ? Color.accentColor : Color.secondary)
+            }
+            .buttonStyle(.plain)
+            .help(included ? "Exclude from this sync" : "Include in this sync")
+
             Image(systemName: item.action.symbol)
                 .foregroundStyle(color(item.action))
                 .font(.caption)
@@ -447,5 +502,6 @@ struct FolderGroupView: View {
             }
         }
         .padding(.vertical, 1)
+        .opacity(included ? 1 : 0.45)
     }
 }
