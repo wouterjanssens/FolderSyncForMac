@@ -187,37 +187,48 @@ final class UpdateChecker: ObservableObject {
         let script = """
         #!/bin/bash
         # Wait for FolderSync (pid \(pid)) to quit, then swap the bundle and relaunch.
+        LOG="$HOME/Library/Logs/FolderSync-update.log"
+        exec >>"$LOG" 2>&1
+        echo "==== FolderSync update $(date) ===="
+
         DEST=\(shellQuote(dest.path))
         SRC=\(shellQuote(newApp.path))
         SCRATCH=\(shellQuote(scratch.path))
         ZIP=\(shellQuote(zip.path))
+        echo "DEST=$DEST"
+        echo "SRC=$SRC"
 
-        for _ in $(seq 1 300); do
+        echo "waiting for pid \(pid) to exit…"
+        for _ in $(seq 1 600); do
             kill -0 \(pid) 2>/dev/null || break
             sleep 0.2
         done
+        echo "app exited (or wait timed out); swapping"
 
         rm -rf "$DEST.old"
-        if mv "$DEST" "$DEST.old" 2>/dev/null && ditto "$SRC" "$DEST"; then
-            xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
+        if mv "$DEST" "$DEST.old" 2>/dev/null && /usr/bin/ditto "$SRC" "$DEST"; then
+            echo "swap OK"
+            /usr/bin/xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
             rm -rf "$DEST.old"
         else
-            # Roll back on failure.
+            echo "swap FAILED — rolling back"
             rm -rf "$DEST"
             mv "$DEST.old" "$DEST" 2>/dev/null || true
         fi
 
         rm -f "$ZIP"
-        open "$DEST"
-        # Self-clean (script lives inside the scratch dir).
+        echo "relaunching $DEST"
+        if /usr/bin/open "$DEST"; then echo "open OK"; else echo "open FAILED ($?)"; fi
         rm -rf "$SCRATCH"
+        echo "done"
         """
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
         return scriptURL
     }
 
-    /// Launch the detached helper and quit. The helper relaunches the new app.
+    /// Launch the detached helper and quit. The helper waits for this process to
+    /// exit, swaps the bundle, and relaunches the new app.
     func finishUpdate() {
         guard let script = pendingHelperScript else { return }
         let task = Process()
@@ -225,10 +236,15 @@ final class UpdateChecker: ObservableObject {
         task.arguments = [script.path]
         do {
             try task.run()                       // orphaned → adopted by launchd on quit
-            NSApplication.shared.terminate(nil)
         } catch {
             phase = .failed("Couldn't start the updater: \(error.localizedDescription)")
+            return
         }
+        // The helper only proceeds once we exit, so we MUST quit. Ask AppKit to
+        // terminate, then hard-exit shortly after as a guaranteed fallback in
+        // case something defers the graceful termination.
+        NSApplication.shared.terminate(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { exit(0) }
     }
 
     func dismiss() {

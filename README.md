@@ -29,10 +29,11 @@ but drops everything you don't need.
 - The "remote" is just a path — point it at a local folder, an external disk under
   `/Volumes/...`, or a NAS share you've mounted in Finder.
 - **Built-in updates:** on launch (and via **FolderSync → Check for Updates…**) the app
-  asks GitHub for the latest release. If a newer version exists you get a prompt with a
-  link to the release notes ("see what's changed") and an **Update Now** button that
-  downloads the release, swaps the app in place, and asks you to reopen it. Choosing
-  **Later** just dismisses it — the next launch checks again.
+  checks GitHub for the latest release (via the non-rate-limited `releases/latest`
+  redirect). If a newer version exists you get a prompt with a link to the release notes
+  ("see what's changed") and an **Update Now** button that downloads the release; a small
+  helper then quits the app, swaps in the new build, and relaunches it automatically.
+  Choosing **Later** just dismisses it — the next launch checks again.
 
 ## Requirements
 
@@ -94,8 +95,9 @@ file access — allow it.
 - `Models.swift` — job, plan, and result types.
 - `JobStore.swift` — persists jobs to `~/Library/Application Support/FolderSync/jobs.json`.
 - `JobRunner.swift` — runs analyze/sync off the main thread with live progress + cancel.
-- `Updater.swift` — checks the GitHub Releases API, downloads the release zip, and swaps
-  the running `.app` bundle in place. `UpdateView.swift` is the prompt.
+- `Updater.swift` — checks GitHub via the `releases/latest` redirect, downloads the release
+  zip, and applies it with a detached helper that swaps the bundle after the app quits and
+  relaunches it. `UpdateView.swift` is the prompt.
 - `App.swift`, `ContentView.swift`, `JobDetailView.swift` — the SwiftUI interface.
 
 ## Deliberately *not* included (kept simple)
