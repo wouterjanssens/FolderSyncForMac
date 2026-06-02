@@ -222,7 +222,65 @@ struct SyncEngine {
                 < ($1.action.sortRank, $1.relativePath.lowercased())
         }
 
-        return SyncPlan(jobID: job.id, items: items, errors: errors)
+        let localTree = SyncEngine.buildSizeTree(rootName: localRoot.lastPathComponent, from: localMap)
+        let remoteTree = SyncEngine.buildSizeTree(rootName: remoteRoot.lastPathComponent, from: remoteMap)
+
+        return SyncPlan(jobID: job.id, items: items, errors: errors,
+                        localSizes: localTree, remoteSizes: remoteTree)
+    }
+
+    // MARK: - Size breakdown
+
+    /// Aggregate a flat scan map into a folder tree with cumulative sizes,
+    /// so the UI can show where the data actually lives. Reuses the map a
+    /// scan already produced — no extra filesystem walk.
+    static func buildSizeTree(rootName: String, from map: [String: FileEntry]) -> FolderSizeNode {
+        // Mutable reference nodes while accumulating; frozen to value types after.
+        final class Build {
+            let name: String
+            let path: String
+            var total: Int64 = 0
+            var directBytes: Int64 = 0
+            var fileCount: Int = 0
+            var children: [String: Build] = [:]
+            init(_ name: String, _ path: String) { self.name = name; self.path = path }
+        }
+
+        let root = Build(rootName, "")
+        for entry in map.values where !entry.isDirectory {
+            let comps = entry.relativePath.split(separator: "/").map(String.init)
+            guard !comps.isEmpty else { continue }
+            root.total += entry.size
+            root.fileCount += 1
+            var node = root
+            var pathSoFar = ""
+            // Walk the directory components (everything but the filename),
+            // rolling the size up into each ancestor along the way.
+            for comp in comps.dropLast() {
+                pathSoFar = pathSoFar.isEmpty ? comp : pathSoFar + "/" + comp
+                let child = node.children[comp] ?? {
+                    let made = Build(comp, pathSoFar)
+                    node.children[comp] = made
+                    return made
+                }()
+                child.total += entry.size
+                child.fileCount += 1
+                node = child
+            }
+            node.directBytes += entry.size   // `node` is now the immediate parent
+        }
+
+        func freeze(_ n: Build) -> FolderSizeNode {
+            let kids = n.children.values.map(freeze).sorted {
+                $0.totalBytes != $1.totalBytes
+                    ? $0.totalBytes > $1.totalBytes
+                    : $0.name.lowercased() < $1.name.lowercased()
+            }
+            return FolderSizeNode(name: n.name, relativePath: n.path,
+                                  totalBytes: n.total, fileCount: n.fileCount,
+                                  directFileBytes: n.directBytes, children: kids)
+        }
+        return freeze(root)
     }
 
     // MARK: - Execution

@@ -86,6 +86,53 @@ import Testing
     #expect(plan.isEmpty)
 }
 
+@Test func buildSizeTreeRollsUpCumulativeSizes() {
+    // a.txt (3) at root, sub/b.txt (4) and sub/deep/c.txt (5) nested.
+    let map: [String: FileEntry] = [
+        "a.txt":          FileEntry(relativePath: "a.txt", size: 3, mtime: .distantPast, isDirectory: false),
+        "sub":            FileEntry(relativePath: "sub", size: 0, mtime: .distantPast, isDirectory: true),
+        "sub/b.txt":      FileEntry(relativePath: "sub/b.txt", size: 4, mtime: .distantPast, isDirectory: false),
+        "sub/deep":       FileEntry(relativePath: "sub/deep", size: 0, mtime: .distantPast, isDirectory: true),
+        "sub/deep/c.txt": FileEntry(relativePath: "sub/deep/c.txt", size: 5, mtime: .distantPast, isDirectory: false),
+    ]
+    let root = SyncEngine.buildSizeTree(rootName: "root", from: map)
+
+    #expect(root.totalBytes == 12)        // 3 + 4 + 5
+    #expect(root.fileCount == 3)
+    #expect(root.directFileBytes == 3)    // only a.txt sits directly at the root
+
+    let sub = root.children.first { $0.name == "sub" }
+    #expect(sub?.totalBytes == 9)         // 4 + 5
+    #expect(sub?.fileCount == 2)
+    #expect(sub?.directFileBytes == 4)    // only b.txt sits directly in sub
+
+    let deep = sub?.children.first { $0.name == "deep" }
+    #expect(deep?.totalBytes == 5)
+    #expect(deep?.children.isEmpty == true)
+}
+
+@Test func buildSizeTreeSortsChildrenLargestFirst() {
+    let map: [String: FileEntry] = [
+        "small/x": FileEntry(relativePath: "small/x", size: 1, mtime: .distantPast, isDirectory: false),
+        "big/y":   FileEntry(relativePath: "big/y", size: 100, mtime: .distantPast, isDirectory: false),
+        "mid/z":   FileEntry(relativePath: "mid/z", size: 10, mtime: .distantPast, isDirectory: false),
+    ]
+    let root = SyncEngine.buildSizeTree(rootName: "root", from: map)
+    #expect(root.children.map(\.name) == ["big", "mid", "small"])
+}
+
+@Test func analyzeProducesSizeTreesForBothSides() throws {
+    let ws = try TempWorkspace(); defer { ws.cleanup() }
+    try ws.write(.local, "docs/a.txt", "hello")
+    try ws.write(.remote, "old.txt", "x")
+
+    let plan = ws.analyze()
+    #expect(plan.localSizes != nil)
+    #expect(plan.remoteSizes != nil)
+    #expect(plan.localSizes?.totalBytes == Int64("hello".count))
+    #expect(plan.localSizes?.children.first?.name == "docs")
+}
+
 @Test func analyzeDetectsMoveInsteadOfCreatePlusDelete() throws {
     let ws = try TempWorkspace(); defer { ws.cleanup() }
     // Same content at a new local path; the orphaned remote copy should be

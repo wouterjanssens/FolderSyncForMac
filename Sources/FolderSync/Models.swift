@@ -81,11 +81,29 @@ struct PlanItem: Identifiable, Hashable {
     var fromPath: String? = nil
 }
 
+/// A folder in a size-breakdown tree. `totalBytes` and `fileCount` are
+/// cumulative (this folder's own files plus every descendant), so a parent
+/// always sums its children. Children are sorted largest-first.
+struct FolderSizeNode: Identifiable {
+    let name: String            // folder name; "" for the root
+    let relativePath: String    // "" for the root
+    let totalBytes: Int64       // cumulative: own files + all descendants
+    let fileCount: Int          // cumulative file count (directories excluded)
+    let directFileBytes: Int64  // bytes of files sitting directly in this folder
+    let children: [FolderSizeNode]
+
+    var id: String { relativePath }
+}
+
 /// The full result of analyzing a job: everything that *would* happen on sync.
 struct SyncPlan {
     var jobID: UUID
     var items: [PlanItem]
     var errors: [String]
+    /// Size breakdown of each side, built from the same scan that produced the
+    /// plan. Nil when the corresponding folder could not be scanned.
+    var localSizes: FolderSizeNode? = nil
+    var remoteSizes: FolderSizeNode? = nil
 
     var createCount: Int { items.lazy.filter { $0.action == .create }.count }
     var moveCount: Int { items.lazy.filter { $0.action == .move }.count }
