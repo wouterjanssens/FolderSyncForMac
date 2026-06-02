@@ -1,60 +1,62 @@
 import Foundation
 import AppKit
 
-/// A release fetched from the GitHub Releases API.
+/// A release discovered on GitHub.
 struct ReleaseInfo: Identifiable, Equatable {
     var id: String { tag }
     let tag: String          // e.g. "v1.2.0"
     let version: String      // normalized, e.g. "1.2.0"
-    let name: String         // human title, e.g. "FolderSync 1.2.0"
-    let notes: String        // release body (markdown)
-    let pageURL: URL         // html_url — "see what changed"
-    let zipURL: URL          // browser_download_url of the .app zip asset
+    let pageURL: URL         // the release page — "see what changed"
+    let zipURL: URL          // direct download of the .app zip asset
 }
 
-/// Drives the in-app update flow: checks GitHub for a newer release, then
-/// downloads and swaps the running .app bundle in place.
+/// Drives the in-app update flow.
+///
+/// Version checks use the **non-API** `github.com/<repo>/releases/latest`
+/// redirect, which returns the latest tag without consuming the 60/hour
+/// unauthenticated `api.github.com` rate limit. The update itself is applied by
+/// a small detached helper script that waits for the app to quit, swaps the
+/// bundle, and relaunches — so it works even though the app can't overwrite
+/// itself while running.
 @MainActor
 final class UpdateChecker: ObservableObject {
 
     enum Phase: Equatable {
         case idle
         case checking
-        case available          // a newer release is ready to install
+        case available          // a newer release exists
         case downloading
-        case installed          // swapped in place; user must reopen
+        case readyToRelaunch    // downloaded & staged; quit+relaunch to apply
         case failed(String)
-        case upToDate           // only surfaced for a manual (non-silent) check
+        case upToDate           // only shown for a manual (non-silent) check
     }
 
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var available: ReleaseInfo?
-    @Published private(set) var progress: Double = 0   // 0…1 during download
+    @Published private(set) var progress: Double = 0
 
-    /// True whenever there is something to show the user in a sheet.
     var hasSomethingToShow: Bool {
         switch phase {
-        case .available, .downloading, .installed, .failed, .upToDate: return true
+        case .available, .downloading, .readyToRelaunch, .failed, .upToDate: return true
         case .idle, .checking: return false
         }
     }
 
-    // GitHub repo that publishes releases.
     private let owner = "wouterjanssens"
     private let repo = "FolderSyncForMac"
 
-    /// The currently running app's marketing version (CFBundleShortVersionString).
     let currentVersion: String = {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0"
     }()
 
     private var checkedThisLaunch = false
 
-    /// Check for a newer release.
-    /// - Parameter silent: when true (the automatic launch check), an "up to
-    ///   date" result or a network error is swallowed rather than shown.
+    /// Paths prepared by `downloadAndInstall`, applied by `finishUpdate`.
+    private var pendingHelperScript: URL?
+
+    // MARK: - Check
+
     func checkForUpdates(silent: Bool) async {
-        // The automatic launch check should run only once per launch.
         if silent {
             guard !checkedThisLaunch else { return }
             checkedThisLaunch = true
@@ -73,87 +75,64 @@ final class UpdateChecker: ObservableObject {
             }
         } catch {
             available = nil
-            if silent {
-                phase = .idle
-            } else {
-                phase = .failed("Couldn't check for updates: \(error.localizedDescription)")
-            }
+            phase = silent ? .idle : .failed("Couldn't check for updates: \(error.localizedDescription)")
         }
     }
 
-    /// Download the release zip and replace the running .app bundle in place.
+    /// Resolve the latest release via the releases/latest redirect (no API,
+    /// no rate limit). The redirect target encodes the tag.
+    private func fetchLatestRelease() async throws -> ReleaseInfo? {
+        let url = URL(string: "https://github.com/\(owner)/\(repo)/releases/latest")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.setValue("FolderSync-Updater", forHTTPHeaderField: "User-Agent")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+
+        let (_, response) = try await URLSession.shared.data(for: request, delegate: RedirectBlocker())
+        guard let http = response as? HTTPURLResponse else { throw UpdateError.badStatus(-1) }
+
+        // A repo with no releases redirects to .../releases (no /tag/), or 404s.
+        guard (300..<400).contains(http.statusCode),
+              let location = http.value(forHTTPHeaderField: "Location"),
+              let pageURL = URL(string: location),
+              location.contains("/releases/tag/") else {
+            return nil
+        }
+
+        let tag = (location as NSString).lastPathComponent           // "v1.2.0"
+        let version = normalize(tag)                                  // "1.2.0"
+        // The release workflow names the asset FolderSync-<version>.zip.
+        let zipString = "https://github.com/\(owner)/\(repo)/releases/download/\(tag)/FolderSync-\(version).zip"
+        guard let zipURL = URL(string: zipString) else { return nil }
+
+        return ReleaseInfo(tag: tag, version: version, pageURL: pageURL, zipURL: zipURL)
+    }
+
+    /// Blocks redirect following so we can read the 3xx `Location` header.
+    private final class RedirectBlocker: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)   // don't follow — surface the 3xx response
+        }
+    }
+
+    // MARK: - Download & stage
+
     func downloadAndInstall() async {
         guard let release = available else { return }
         phase = .downloading
         progress = 0
         do {
-            let zipURL = try await download(release.zipURL)
-            try install(fromZip: zipURL)
-            phase = .installed
+            let zip = try await download(release.zipURL)
+            let script = try stageUpdate(fromZip: zip)
+            pendingHelperScript = script
+            phase = .readyToRelaunch
         } catch {
             phase = .failed("Update failed: \(error.localizedDescription)")
         }
     }
-
-    /// Dismiss the current sheet. A "Later" dismissal leaves nothing persisted,
-    /// so the next launch checks again.
-    func dismiss() {
-        // Keep `available` around only while showing it; reset transient phases.
-        if phase != .downloading { phase = .idle }
-    }
-
-    // MARK: - GitHub
-
-    private func fetchLatestRelease() async throws -> ReleaseInfo? {
-        let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/releases/latest")!
-        var request = URLRequest(url: url)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("FolderSync-Updater", forHTTPHeaderField: "User-Agent")
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        if let http = response as? HTTPURLResponse, http.statusCode == 404 {
-            return nil   // no releases yet
-        }
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw UpdateError.badStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
-        }
-
-        let payload = try JSONDecoder().decode(GitHubRelease.self, from: data)
-        guard !payload.draft, !payload.prerelease else { return nil }
-
-        // Find the .app zip asset (the workflow names it FolderSync-<version>.zip).
-        guard let asset = payload.assets.first(where: { $0.name.hasSuffix(".zip") }),
-              let zipURL = URL(string: asset.browser_download_url),
-              let pageURL = URL(string: payload.html_url) else {
-            return nil
-        }
-
-        return ReleaseInfo(
-            tag: payload.tag_name,
-            version: normalize(payload.tag_name),
-            name: payload.name?.isEmpty == false ? payload.name! : payload.tag_name,
-            notes: payload.body ?? "",
-            pageURL: pageURL,
-            zipURL: zipURL
-        )
-    }
-
-    private struct GitHubRelease: Decodable {
-        let tag_name: String
-        let name: String?
-        let body: String?
-        let html_url: String
-        let draft: Bool
-        let prerelease: Bool
-        let assets: [Asset]
-        struct Asset: Decodable {
-            let name: String
-            let browser_download_url: String
-        }
-    }
-
-    // MARK: - Download & install
 
     private func download(_ url: URL) async throws -> URL {
         var request = URLRequest(url: url)
@@ -162,7 +141,6 @@ final class UpdateChecker: ObservableObject {
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw UpdateError.badStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
         }
-        // Move into a uniquely-named temp file we control with a .zip suffix.
         let dest = FileManager.default.temporaryDirectory
             .appendingPathComponent("FolderSync-update-\(UUID().uuidString).zip")
         try? FileManager.default.removeItem(at: dest)
@@ -171,60 +149,98 @@ final class UpdateChecker: ObservableObject {
         return dest
     }
 
-    /// Unzip the downloaded archive and atomically swap it over the running bundle.
-    private func install(fromZip zip: URL) throws {
+    /// Extract the zip and write a helper script that performs the swap after
+    /// the app quits. Returns the helper script URL. Throws (before any
+    /// destructive step) if the app can't be safely updated in place.
+    private func stageUpdate(fromZip zip: URL) throws -> URL {
         let fm = FileManager.default
-        let installedURL = Bundle.main.bundleURL          // …/FolderSync.app
-        guard installedURL.pathExtension == "app" else {
-            throw UpdateError.notAppBundle
+        let dest = Bundle.main.bundleURL                       // …/FolderSync.app
+
+        guard dest.pathExtension == "app" else { throw UpdateError.notAppBundle }
+
+        // App Translocation: a quarantined app opened straight from Downloads
+        // runs from a read-only randomized path. We can't update it in place.
+        guard !dest.path.contains("/AppTranslocation/") else {
+            throw UpdateError.translocated
         }
 
-        // 1. Extract into a scratch dir.
+        let parent = dest.deletingLastPathComponent()
+        guard fm.isWritableFile(atPath: parent.path) else {
+            throw UpdateError.notWritable(parent.path)
+        }
+
+        // Extract into a scratch dir the helper will clean up.
         let scratch = fm.temporaryDirectory
-            .appendingPathComponent("FolderSync-extract-\(UUID().uuidString)")
+            .appendingPathComponent("FolderSync-update-\(UUID().uuidString)")
         try fm.createDirectory(at: scratch, withIntermediateDirectories: true)
-        defer { try? fm.removeItem(at: scratch) }
         try run("/usr/bin/ditto", ["-x", "-k", zip.path, scratch.path])
 
-        // 2. Locate the extracted FolderSync.app.
         guard let newApp = try locateApp(in: scratch) else {
             throw UpdateError.appNotFoundInZip
         }
 
-        // 3. Clear the download quarantine so Gatekeeper doesn't re-warn on reopen.
-        try? run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", newApp.path])
+        let pid = ProcessInfo.processInfo.processIdentifier
+        // Script lives OUTSIDE the scratch dir so it can delete the scratch dir
+        // without removing itself mid-run.
+        let scriptURL = fm.temporaryDirectory
+            .appendingPathComponent("FolderSync-apply-\(UUID().uuidString).sh")
+        let script = """
+        #!/bin/bash
+        # Wait for FolderSync (pid \(pid)) to quit, then swap the bundle and relaunch.
+        DEST=\(shellQuote(dest.path))
+        SRC=\(shellQuote(newApp.path))
+        SCRATCH=\(shellQuote(scratch.path))
+        ZIP=\(shellQuote(zip.path))
 
-        // 4. Stage it next to the installed app (same volume → atomic moves).
-        let parent = installedURL.deletingLastPathComponent()
-        let staged = parent.appendingPathComponent("FolderSync.app.new")
-        let backup = parent.appendingPathComponent("FolderSync.app.old")
-        try? fm.removeItem(at: staged)
-        try? fm.removeItem(at: backup)
-        try fm.copyItem(at: newApp, to: staged)
+        for _ in $(seq 1 300); do
+            kill -0 \(pid) 2>/dev/null || break
+            sleep 0.2
+        done
 
-        // 5. Swap: move running bundle aside, move new one in, drop the backup.
-        //    The running process keeps its open file handles, so this is safe.
+        rm -rf "$DEST.old"
+        if mv "$DEST" "$DEST.old" 2>/dev/null && ditto "$SRC" "$DEST"; then
+            xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
+            rm -rf "$DEST.old"
+        else
+            # Roll back on failure.
+            rm -rf "$DEST"
+            mv "$DEST.old" "$DEST" 2>/dev/null || true
+        fi
+
+        rm -f "$ZIP"
+        open "$DEST"
+        # Self-clean (script lives inside the scratch dir).
+        rm -rf "$SCRATCH"
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    /// Launch the detached helper and quit. The helper relaunches the new app.
+    func finishUpdate() {
+        guard let script = pendingHelperScript else { return }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/bash")
+        task.arguments = [script.path]
         do {
-            try fm.moveItem(at: installedURL, to: backup)
-            try fm.moveItem(at: staged, to: installedURL)
-            try? fm.removeItem(at: backup)
+            try task.run()                       // orphaned → adopted by launchd on quit
+            NSApplication.shared.terminate(nil)
         } catch {
-            // Roll back if the second move failed.
-            if !fm.fileExists(atPath: installedURL.path),
-               fm.fileExists(atPath: backup.path) {
-                try? fm.moveItem(at: backup, to: installedURL)
-            }
-            try? fm.removeItem(at: staged)
-            throw error
+            phase = .failed("Couldn't start the updater: \(error.localizedDescription)")
         }
     }
 
-    /// Find the first *.app at the root (or one level down) of a directory.
+    func dismiss() {
+        if phase != .downloading { phase = .idle }
+    }
+
+    // MARK: - Helpers
+
     private func locateApp(in dir: URL) throws -> URL? {
         let fm = FileManager.default
         let items = try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
         if let app = items.first(where: { $0.pathExtension == "app" }) { return app }
-        // ditto without --keepParent can nest; check one level down just in case.
         for sub in items where (try? sub.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
             if let nested = try? fm.contentsOfDirectory(at: sub, includingPropertiesForKeys: nil),
                let app = nested.first(where: { $0.pathExtension == "app" }) {
@@ -248,21 +264,21 @@ final class UpdateChecker: ObservableObject {
         }
     }
 
-    // MARK: - Version compare
+    /// Single-quote a string for safe embedding in the bash helper.
+    private func shellQuote(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
 
-    /// Strip a leading "v" and trailing junk so "v1.2.0" → "1.2.0".
     private func normalize(_ tag: String) -> String {
         var s = tag.trimmingCharacters(in: .whitespaces)
         if s.hasPrefix("v") || s.hasPrefix("V") { s.removeFirst() }
         return s
     }
 
-    /// Semantic-ish compare: split on ".", compare numerically, pad with zeros.
     private func isNewer(_ candidate: String, than current: String) -> Bool {
         let a = candidate.split(separator: ".").map { Int($0.prefix(while: \.isNumber)) ?? 0 }
         let b = current.split(separator: ".").map { Int($0.prefix(while: \.isNumber)) ?? 0 }
-        let count = max(a.count, b.count)
-        for i in 0..<count {
+        for i in 0..<max(a.count, b.count) {
             let l = i < a.count ? a[i] : 0
             let r = i < b.count ? b[i] : 0
             if l != r { return l > r }
@@ -274,6 +290,8 @@ final class UpdateChecker: ObservableObject {
 enum UpdateError: LocalizedError {
     case badStatus(Int)
     case notAppBundle
+    case translocated
+    case notWritable(String)
     case appNotFoundInZip
     case commandFailed(String)
 
@@ -281,6 +299,10 @@ enum UpdateError: LocalizedError {
         switch self {
         case .badStatus(let code): return "server returned status \(code)"
         case .notAppBundle: return "the app isn't running from a .app bundle"
+        case .translocated:
+            return "FolderSync is running from a temporary location. Move FolderSync.app to your Applications folder, reopen it, then update."
+        case .notWritable(let path):
+            return "can't write to \(path). Move FolderSync.app somewhere you own (e.g. Applications) and try again."
         case .appNotFoundInZip: return "the downloaded archive didn't contain FolderSync.app"
         case .commandFailed(let msg): return msg
         }

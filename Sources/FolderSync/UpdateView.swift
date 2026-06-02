@@ -21,8 +21,8 @@ struct UpdateView: View {
         switch updater.phase {
         case .available, .downloading:
             availableOrDownloading
-        case .installed:
-            installed
+        case .readyToRelaunch:
+            readyToRelaunch
         case .upToDate:
             simple(
                 icon: "checkmark.circle.fill",
@@ -73,23 +73,6 @@ struct UpdateView: View {
                     Label("See what's changed", systemImage: "link")
                 }
                 .font(.subheadline)
-
-                if !release.notes.isEmpty {
-                    ScrollView {
-                        Text(release.notes)
-                            .font(.callout)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-                    .frame(maxHeight: 160)
-                    .padding(8)
-                    .background(Color(nsColor: .textBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color(nsColor: .separatorColor))
-                    )
-                }
             }
 
             if downloading {
@@ -114,20 +97,20 @@ struct UpdateView: View {
         }
     }
 
-    // MARK: - Installed → reopen prompt
+    // MARK: - Downloaded → relaunch to apply
 
-    private var installed: some View {
+    private var readyToRelaunch: some View {
         simple(
             icon: "checkmark.circle.fill",
             tint: .green,
-            title: "Update installed",
-            message: "The new version has been installed. Quit FolderSync and open it again to start using it."
+            title: "Update ready",
+            message: "The update has been downloaded. FolderSync will quit and reopen automatically to finish installing it."
         ) {
-            Button("Quit FolderSync") {
-                NSApplication.shared.terminate(nil)
+            Button("Later") { close() }
+            Button("Relaunch & Update") {
+                updater.finishUpdate()
             }
             .keyboardShortcut(.defaultAction)
-            Button("Later") { close() }
         }
     }
 
