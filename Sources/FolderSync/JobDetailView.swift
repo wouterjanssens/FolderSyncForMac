@@ -1,8 +1,22 @@
 import SwiftUI
 
+/// Which side's folder-size breakdown the analysis panel is showing.
+enum SizeSide: String, CaseIterable, Identifiable {
+    case local = "Local", remote = "Remote"
+    var id: String { rawValue }
+}
+
+/// The two views of an analysis result; only one is shown at a time.
+enum AnalysisTab: String, CaseIterable, Identifiable {
+    case changes = "Changes to sync", sizes = "Folder sizes"
+    var id: String { rawValue }
+}
+
 struct JobDetailView: View {
     @Binding var job: SyncJob
     @StateObject private var runner = JobRunner()
+    @State private var sizeSide: SizeSide = .local
+    @State private var analysisTab: AnalysisTab = .changes
 
     var body: some View {
         ScrollView {
@@ -99,6 +113,7 @@ struct JobDetailView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 Button {
+                    analysisTab = .changes   // always land on "what changed" first
                     runner.analyze(job: job)
                 } label: {
                     Label("Analyze", systemImage: "magnifyingglass")
@@ -256,56 +271,113 @@ struct JobDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(6)
             }
-        } else if plan.isEmpty {
+        } else {
             GroupBox {
-                Label("Already in sync — nothing to do.", systemImage: "checkmark.seal.fill")
-                    .foregroundStyle(.green)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(6)
+                VStack(alignment: .leading, spacing: 10) {
+                    Picker("", selection: $analysisTab) {
+                        ForEach(AnalysisTab.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .labelsHidden().pickerStyle(.segmented)
+                    Divider()
+                    switch analysisTab {
+                    case .changes: changesTab(plan)
+                    case .sizes:   sizesTab(plan)
+                    }
+                }
+                .padding(6)
+            } label: {
+                Label("Analysis", systemImage: "checklist")
             }
+        }
+    }
+
+    // MARK: Changes-to-sync tab
+
+    @ViewBuilder
+    private func changesTab(_ plan: SyncPlan) -> some View {
+        if plan.isEmpty {
+            Label("Already in sync — nothing to do.", systemImage: "checkmark.seal.fill")
+                .foregroundStyle(.green)
+                .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             let sel = plan.items.filter { runner.includedIDs.contains($0.id) }
             let selFiles = sel.filter { !$0.isDirectory }.count
             let allFiles = plan.items.filter { !$0.isDirectory }.count
             let selBytes = sel.filter { ($0.action == .create || $0.action == .update) && !$0.isDirectory }
                 .reduce(Int64(0)) { $0 + $1.size }
-            GroupBox {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 14) {
-                        Button {
-                            let allSelected = sel.count == plan.items.count
-                            runner.setIncluded(plan.items, !allSelected)
-                        } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: Self.checkboxSymbol(selected: sel.count, total: plan.items.count))
-                                Text("All")
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .help("Check or uncheck every file")
-
-                        summaryBadge(count: sel.filter { $0.action == .create && !$0.isDirectory }.count,
-                                     label: "New", color: .green, symbol: "plus.circle.fill")
-                        summaryBadge(count: sel.filter { $0.action == .move }.count,
-                                     label: "Moved", color: .purple, symbol: "arrow.left.arrow.right.circle.fill")
-                        summaryBadge(count: sel.filter { $0.action == .update }.count,
-                                     label: "Changed", color: .blue, symbol: "arrow.triangle.2.circlepath.circle.fill")
-                        summaryBadge(count: sel.filter { $0.action == .delete }.count,
-                                     label: "Removed", color: .orange, symbol: "trash.circle.fill")
-                        Spacer()
-                        VStack(alignment: .trailing, spacing: 1) {
-                            Text("To copy: \(Format.bytes(selBytes))").font(.callout.weight(.medium))
-                            Text("\(selFiles) of \(allFiles) files selected")
-                                .font(.caption2).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 14) {
+                    Button {
+                        let allSelected = sel.count == plan.items.count
+                        runner.setIncluded(plan.items, !allSelected)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: Self.checkboxSymbol(selected: sel.count, total: plan.items.count))
+                            Text("All")
                         }
                     }
-                    Divider()
-                    planList(plan)
+                    .buttonStyle(.plain)
+                    .help("Check or uncheck every file")
+
+                    summaryBadge(count: sel.filter { $0.action == .create && !$0.isDirectory }.count,
+                                 label: "New", color: .green, symbol: "plus.circle.fill")
+                    summaryBadge(count: sel.filter { $0.action == .move }.count,
+                                 label: "Moved", color: .purple, symbol: "arrow.left.arrow.right.circle.fill")
+                    summaryBadge(count: sel.filter { $0.action == .update }.count,
+                                 label: "Changed", color: .blue, symbol: "arrow.triangle.2.circlepath.circle.fill")
+                    summaryBadge(count: sel.filter { $0.action == .delete }.count,
+                                 label: "Removed", color: .orange, symbol: "trash.circle.fill")
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 1) {
+                        Text("To copy: \(Format.bytes(selBytes))").font(.callout.weight(.medium))
+                        Text("\(selFiles) of \(allFiles) files selected")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
-                .padding(6)
-            } label: {
-                Label("Analysis — choose what to sync", systemImage: "checklist")
+                Divider()
+                planList(plan)
             }
+        }
+    }
+
+    // MARK: Folder-sizes tab
+
+    @ViewBuilder
+    private func sizesTab(_ plan: SyncPlan) -> some View {
+        let tree = sizeSide == .local ? plan.localSizes : plan.remoteSizes
+        if let tree {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Picker("", selection: $sizeSide) {
+                        ForEach(SizeSide.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .labelsHidden().pickerStyle(.segmented).fixedSize()
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 1) {
+                        Text(Format.bytes(tree.totalBytes)).font(.callout.weight(.medium))
+                        Text("\(tree.fileCount) file\(tree.fileCount == 1 ? "" : "s")")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                Text("Cumulative size per folder — biggest first. Click a folder to drill in.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Divider()
+                if tree.children.isEmpty && tree.fileCount == 0 {
+                    Text("This folder is empty.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    ScrollView {
+                        FolderSizeRow(node: tree, parentBytes: tree.totalBytes, depth: 0)
+                            .padding(.trailing, 6)
+                    }
+                    .frame(height: 300)
+                }
+            }
+        } else {
+            Text("No size information available.")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -503,5 +575,89 @@ struct FolderGroupView: View {
         }
         .padding(.vertical, 1)
         .opacity(included ? 1 : 0.45)
+    }
+}
+
+// MARK: - Folder size breakdown
+
+/// One collapsible folder in the size-breakdown tree. Shows cumulative size,
+/// a bar for its share of the parent, and its file count. Renders children
+/// recursively, largest-first. Children are only built when expanded, so a
+/// deep tree stays cheap until you drill into it.
+struct FolderSizeRow: View {
+    let node: FolderSizeNode
+    let parentBytes: Int64
+    let depth: Int
+    @State private var expanded: Bool
+
+    init(node: FolderSizeNode, parentBytes: Int64, depth: Int) {
+        self.node = node
+        self.parentBytes = parentBytes
+        self.depth = depth
+        _expanded = State(initialValue: depth == 0)   // root open, rest collapsed
+    }
+
+    private var hasChildren: Bool { !node.children.isEmpty }
+    private var fraction: Double {
+        parentBytes > 0 ? min(1, Double(node.totalBytes) / Double(parentBytes)) : 0
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                if hasChildren { withAnimation(.easeInOut(duration: 0.12)) { expanded.toggle() } }
+            } label: {
+                HStack(spacing: 6) {
+                    if hasChildren {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.caption2).foregroundStyle(.secondary).frame(width: 10)
+                    } else {
+                        Spacer().frame(width: 10)
+                    }
+                    Image(systemName: "folder.fill").foregroundStyle(.secondary).font(.caption)
+                    Text(node.name.isEmpty ? "(root)" : node.name)
+                        .font(.system(.caption, design: .monospaced)
+                            .weight(depth == 0 ? .semibold : .regular))
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 8)
+                    proportionBar
+                    Text("\(Int((fraction * 100).rounded()))%")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .frame(width: 36, alignment: .trailing)
+                    Text(Format.bytes(node.totalBytes))
+                        .font(.caption.weight(.medium))
+                        .frame(width: 72, alignment: .trailing)
+                    Text("\(node.fileCount)")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .frame(width: 52, alignment: .trailing)
+                        .help("\(node.fileCount) files in total")
+                }
+                .padding(.vertical, 2)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                ForEach(node.children) { child in
+                    FolderSizeRow(node: child, parentBytes: node.totalBytes, depth: depth + 1)
+                        .padding(.leading, 14)
+                }
+            }
+        }
+    }
+
+    private var proportionBar: some View {
+        ZStack(alignment: .leading) {
+            Capsule().fill(Color.secondary.opacity(0.15)).frame(width: 60, height: 5)
+            Capsule().fill(barColor).frame(width: max(2, 60 * fraction), height: 5)
+        }
+    }
+
+    private var barColor: Color {
+        switch fraction {
+        case 0.5...:     return .red
+        case 0.2..<0.5:  return .orange
+        default:         return .accentColor
+        }
     }
 }
