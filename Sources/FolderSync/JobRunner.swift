@@ -54,14 +54,23 @@ final class JobRunner: ObservableObject {
         result = nil
         plan = nil
         analyzeProgress = AnalyzeProgress(phase: "Starting…")
+        cancelFlag.set(false)
         let engine = engine
+        let flag = cancelFlag
         DispatchQueue.global(qos: .userInitiated).async {
-            let plan = engine.analyze(job: job, progress: { ap in
+            let plan = engine.analyze(job: job, isCancelled: { flag.value }, progress: { ap in
                 DispatchQueue.main.async { self.analyzeProgress = ap }
             })
             DispatchQueue.main.async {
-                self.plan = plan
-                self.includedIDs = Set(plan.items.map(\.id))   // everything checked by default
+                // If cancelled, drop the partial work entirely — never show
+                // results for an analysis the user stopped.
+                if flag.value {
+                    self.plan = nil
+                    self.includedIDs = []
+                } else {
+                    self.plan = plan
+                    self.includedIDs = Set(plan.items.map(\.id))   // everything checked by default
+                }
                 self.isAnalyzing = false
                 self.analyzeProgress = nil
             }

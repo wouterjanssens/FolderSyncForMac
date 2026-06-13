@@ -131,7 +131,7 @@ struct JobDetailView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!runner.canSync)
 
-                if runner.isSyncing {
+                if runner.isSyncing || runner.isAnalyzing {
                     Button(role: .cancel) { runner.cancel() } label: {
                         Label("Cancel", systemImage: "stop.fill")
                     }
