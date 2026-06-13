@@ -20,6 +20,7 @@ struct SyncEngine {
     func scan(root: URL,
               excludes: Set<String>,
               skipTopLevel: String? = nil,
+              isCancelled: (() -> Bool)? = nil,
               onProgress: ((Int, String) -> Void)? = nil) -> (files: [String: FileEntry], errors: [String]) {
         var map: [String: FileEntry] = [:]
         var errors: [String] = []
@@ -45,6 +46,9 @@ struct SyncEngine {
         let rootPath = root.standardizedFileURL.path
 
         for case let url as URL in enumerator {
+            // Stop walking promptly when the analysis is cancelled. The partial
+            // map is discarded upstream — we never surface partial results.
+            if isCancelled?() == true { break }
             // Drain per-iteration temporaries (URL/NSString bridging, resource
             // values). Without this, scanning a large tree on a background
             // thread accumulates autoreleased objects until the run loop drains
@@ -91,8 +95,13 @@ struct SyncEngine {
 
     // MARK: - Analysis
 
-    func analyze(job: SyncJob, progress: ((AnalyzeProgress) -> Void)? = nil) -> SyncPlan {
+    func analyze(job: SyncJob,
+                 isCancelled: @escaping () -> Bool = { false },
+                 progress: ((AnalyzeProgress) -> Void)? = nil) -> SyncPlan {
         let fm = FileManager.default
+        // Returned when cancelled; the caller discards it so partial work is
+        // never shown. Kept non-optional to leave the happy path unchanged.
+        let cancelledPlan = SyncPlan(jobID: job.id, items: [], errors: [])
         let localRoot = URL(fileURLWithPath: job.localPath, isDirectory: true)
         let remoteRoot = URL(fileURLWithPath: job.remotePath, isDirectory: true)
 
@@ -110,14 +119,18 @@ struct SyncEngine {
 
         let excludes = Set(job.excludes)
         progress?(AnalyzeProgress(phase: "Scanning local folder…"))
-        let (localMap, localErrors) = scan(root: localRoot, excludes: excludes) { count, file in
+        let (localMap, localErrors) = scan(root: localRoot, excludes: excludes,
+                                           isCancelled: isCancelled) { count, file in
             progress?(AnalyzeProgress(phase: "Scanning local folder…", filesSeen: count, currentFile: file))
         }
+        if isCancelled() { return cancelledPlan }
         progress?(AnalyzeProgress(phase: "Scanning remote folder…"))
         let (remoteMap, remoteErrors) = scan(root: remoteRoot, excludes: excludes,
-                                             skipTopLevel: SyncEngine.deletedFolderName) { count, file in
+                                             skipTopLevel: SyncEngine.deletedFolderName,
+                                             isCancelled: isCancelled) { count, file in
             progress?(AnalyzeProgress(phase: "Scanning remote folder…", filesSeen: count, currentFile: file))
         }
+        if isCancelled() { return cancelledPlan }
         errors.append(contentsOf: localErrors)
         errors.append(contentsOf: remoteErrors)
 
@@ -173,6 +186,7 @@ struct SyncEngine {
             var moveChecked = 0
             var lastMoveEmit = Date.distantPast
             for localEntry in createCandidates {
+                if isCancelled() { return cancelledPlan }
                 moveChecked += 1
                 if let progress {
                     let now = Date()
