@@ -43,30 +43,36 @@ struct SyncEngine {
         let rootPath = root.standardizedFileURL.path
 
         for case let url as URL in enumerator {
-            let values = try? url.resourceValues(forKeys: keys)
-            let isDir = values?.isDirectory ?? false
+            // Drain per-iteration temporaries (URL/NSString bridging, resource
+            // values). Without this, scanning a large tree on a background
+            // thread accumulates autoreleased objects until the run loop drains
+            // — which never happens here because we never return to one.
+            autoreleasepool {
+                let values = try? url.resourceValues(forKeys: keys)
+                let isDir = values?.isDirectory ?? false
 
-            // Compute path relative to root.
-            var rel = url.standardizedFileURL.path
-            if rel.hasPrefix(rootPath) { rel = String(rel.dropFirst(rootPath.count)) }
-            while rel.hasPrefix("/") { rel = String(rel.dropFirst()) }
-            if rel.isEmpty { continue }
+                // Compute path relative to root.
+                var rel = url.standardizedFileURL.path
+                if rel.hasPrefix(rootPath) { rel = String(rel.dropFirst(rootPath.count)) }
+                while rel.hasPrefix("/") { rel = String(rel.dropFirst()) }
+                if rel.isEmpty { return }
 
-            let lastComponent = url.lastPathComponent
-            if excludes.contains(lastComponent) {
-                if isDir { enumerator.skipDescendants() }
-                continue
+                let lastComponent = url.lastPathComponent
+                if excludes.contains(lastComponent) {
+                    if isDir { enumerator.skipDescendants() }
+                    return
+                }
+
+                if let skip = skipTopLevel,
+                   rel == skip || rel.hasPrefix(skip + "/") {
+                    if isDir { enumerator.skipDescendants() }
+                    return
+                }
+
+                let size = Int64(values?.fileSize ?? 0)
+                let mtime = values?.contentModificationDate ?? .distantPast
+                map[rel] = FileEntry(relativePath: rel, size: size, mtime: mtime, isDirectory: isDir)
             }
-
-            if let skip = skipTopLevel,
-               rel == skip || rel.hasPrefix(skip + "/") {
-                if isDir { enumerator.skipDescendants() }
-                continue
-            }
-
-            let size = Int64(values?.fileSize ?? 0)
-            let mtime = values?.contentModificationDate ?? .distantPast
-            map[rel] = FileEntry(relativePath: rel, size: size, mtime: mtime, isDirectory: isDir)
         }
 
         return (map, errors)
@@ -223,15 +229,17 @@ struct SyncEngine {
             .sorted { $0.relativePath.count < $1.relativePath.count }
         for item in dirs {
             if isCancelled() { result.cancelled = true; return result }
-            let dst = remote.appendingPathComponent(item.relativePath)
-            do {
-                try fm.createDirectory(at: dst, withIntermediateDirectories: true)
-                result.dirsCreated += 1
-            } catch {
-                result.errors.append("Create folder \(item.relativePath): \(error.localizedDescription)")
+            autoreleasepool {
+                let dst = remote.appendingPathComponent(item.relativePath)
+                do {
+                    try fm.createDirectory(at: dst, withIntermediateDirectories: true)
+                    result.dirsCreated += 1
+                } catch {
+                    result.errors.append("Create folder \(item.relativePath): \(error.localizedDescription)")
+                }
+                done += 1
+                report(item.relativePath)
             }
-            done += 1
-            report(item.relativePath)
         }
 
         // 2. Relocate moved files within the remote (no re-copy). If the move
@@ -239,61 +247,73 @@ struct SyncEngine {
         for item in plan.items where item.action == .move {
             if isCancelled() { result.cancelled = true; return result }
             guard let from = item.fromPath else { continue }
-            let src = remote.appendingPathComponent(from)
-            let dst = remote.appendingPathComponent(item.relativePath)
-            do {
-                try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
-                if fm.fileExists(atPath: dst.path) { try fm.removeItem(at: dst) }
-                try fm.moveItem(at: src, to: dst)
-                result.moved += 1
-            } catch {
-                // Fall back to a fresh copy from the local source.
-                let localSrc = local.appendingPathComponent(item.relativePath)
+            autoreleasepool {
+                let src = remote.appendingPathComponent(from)
+                let dst = remote.appendingPathComponent(item.relativePath)
                 do {
-                    try fm.copyItem(at: localSrc, to: dst)
-                    result.created += 1
-                    result.bytesCopied += item.size
+                    try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    if fm.fileExists(atPath: dst.path) { try fm.removeItem(at: dst) }
+                    try fm.moveItem(at: src, to: dst)
+                    result.moved += 1
                 } catch {
-                    result.errors.append("Move \(from) → \(item.relativePath): \(error.localizedDescription)")
+                    // Fall back to a fresh copy from the local source.
+                    let localSrc = local.appendingPathComponent(item.relativePath)
+                    do {
+                        try fm.copyItem(at: localSrc, to: dst)
+                        result.created += 1
+                        result.bytesCopied += item.size
+                    } catch {
+                        result.errors.append("Move \(from) → \(item.relativePath): \(error.localizedDescription)")
+                    }
                 }
+                done += 1
+                report(item.relativePath)
             }
-            done += 1
-            report(item.relativePath)
         }
 
         // 3. Copy new and changed files.
         for item in plan.items where !item.isDirectory && (item.action == .create || item.action == .update) {
             if isCancelled() { result.cancelled = true; return result }
-            let src = local.appendingPathComponent(item.relativePath)
-            let dst = remote.appendingPathComponent(item.relativePath)
-            do {
-                try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
-                if fm.fileExists(atPath: dst.path) { try fm.removeItem(at: dst) }
-                try fm.copyItem(at: src, to: dst)
-                if item.action == .create { result.created += 1 } else { result.updated += 1 }
-                result.bytesCopied += item.size
-            } catch {
-                result.errors.append("Copy \(item.relativePath): \(error.localizedDescription)")
+            // Each copy must drain its own autorelease pool. FileManager.copyItem
+            // leaves behind autoreleased temporaries (and, on some volumes,
+            // internal buffers) sized to the file being copied. Across thousands
+            // of large files on one background-thread loop that never returns to
+            // a run loop, those would otherwise accumulate until the process is
+            // killed for using memory proportional to the total bytes copied.
+            autoreleasepool {
+                let src = local.appendingPathComponent(item.relativePath)
+                let dst = remote.appendingPathComponent(item.relativePath)
+                do {
+                    try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    if fm.fileExists(atPath: dst.path) { try fm.removeItem(at: dst) }
+                    try fm.copyItem(at: src, to: dst)
+                    if item.action == .create { result.created += 1 } else { result.updated += 1 }
+                    result.bytesCopied += item.size
+                } catch {
+                    result.errors.append("Copy \(item.relativePath): \(error.localizedDescription)")
+                }
+                done += 1
+                report(item.relativePath)
             }
-            done += 1
-            report(item.relativePath)
         }
 
         // 4. Move orphaned remote files into _Deleted, preserving subpath.
         let deletedRoot = remote.appendingPathComponent(SyncEngine.deletedFolderName, isDirectory: true)
         for item in plan.items where item.action == .delete && !item.isDirectory {
             if isCancelled() { result.cancelled = true; return result }
-            let src = remote.appendingPathComponent(item.relativePath)
-            let dst = uniqueDestination(deletedRoot.appendingPathComponent(item.relativePath), fm: fm)
-            do {
-                try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try fm.moveItem(at: src, to: dst)
-                result.deletedMoved += 1
-            } catch {
-                result.errors.append("Move to _Deleted \(item.relativePath): \(error.localizedDescription)")
+            autoreleasepool {
+                let src = remote.appendingPathComponent(item.relativePath)
+                let dst = uniqueDestination(deletedRoot.appendingPathComponent(item.relativePath), fm: fm)
+                do {
+                    try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try fm.moveItem(at: src, to: dst)
+                    result.deletedMoved += 1
+                } catch {
+                    result.errors.append("Move to _Deleted \(item.relativePath): \(error.localizedDescription)")
+                }
+                done += 1
+                report(item.relativePath)
             }
-            done += 1
-            report(item.relativePath)
         }
 
         report("")
@@ -313,10 +333,15 @@ struct SyncEngine {
         defer { try? handle.close() }
         var hasher = SHA256()
         let chunkSize = 1 << 20 // 1 MB
-        while true {
-            let chunk = (try? handle.read(upToCount: chunkSize)) ?? nil
-            guard let chunk, !chunk.isEmpty else { break }
-            hasher.update(data: chunk)
+        var reachedEnd = false
+        while !reachedEnd {
+            // Drain each chunk's autoreleased Data immediately; otherwise a large
+            // file's worth of 1 MB buffers piles up before the digest returns.
+            autoreleasepool {
+                let chunk = (try? handle.read(upToCount: chunkSize)) ?? nil
+                guard let chunk, !chunk.isEmpty else { reachedEnd = true; return }
+                hasher.update(data: chunk)
+            }
         }
         return hasher.finalize()
     }
