@@ -14,12 +14,14 @@ struct FolderSyncApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = JobStore()
     @StateObject private var updater = UpdateChecker()
+    @StateObject private var runners = RunnerStore()
 
     var body: some Scene {
         WindowGroup("FolderSync") {
             ContentView()
                 .environmentObject(store)
                 .environmentObject(updater)
+                .environmentObject(runners)
                 .frame(minWidth: 820, minHeight: 520)
                 // Check for updates once each launch. A cancelled prompt isn't
                 // remembered, so the next launch checks again.

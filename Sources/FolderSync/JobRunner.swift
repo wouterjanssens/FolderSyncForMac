@@ -106,3 +106,24 @@ final class JobRunner: ObservableObject {
         includedIDs = []
     }
 }
+
+/// Holds one long-lived `JobRunner` per job, keyed by job id.
+///
+/// The detail view only renders the *selected* job, so its runner can't live in
+/// the view: switching jobs in the sidebar would tear the runner down and discard
+/// any in-flight analysis. Keeping runners here lets analyses for several jobs run
+/// concurrently and survive switching the selection.
+@MainActor
+final class RunnerStore: ObservableObject {
+    private var runners: [UUID: JobRunner] = [:]
+
+    func runner(for id: UUID) -> JobRunner {
+        if let existing = runners[id] { return existing }
+        let runner = JobRunner()
+        runners[id] = runner
+        return runner
+    }
+
+    /// Drop the runner for a removed job so its state is released.
+    func discard(_ id: UUID) { runners[id] = nil }
+}
