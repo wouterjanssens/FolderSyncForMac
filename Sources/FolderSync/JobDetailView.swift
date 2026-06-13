@@ -397,13 +397,21 @@ struct JobDetailView: View {
 
     private func planList(_ plan: SyncPlan) -> some View {
         let groups = FolderGroup.build(from: plan.items)
-        let cap = 400
+        // Headers render lazily and cheaply, so the cap can be generous; it only
+        // exists as a backstop against pathological folder counts.
+        let cap = 5000
         let shown = Array(groups.prefix(cap))
+        // On large plans, start every folder collapsed. Expanded groups build all
+        // their file rows eagerly, which previously made big analyses render blank
+        // or stall. Collapsed, the whole list shows instantly and files appear on
+        // demand when a folder is opened.
+        let startExpanded = plan.items.count <= 500
         return VStack(alignment: .leading, spacing: 0) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(shown) { group in
-                        FolderGroupView(group: group, color: color(for:), runner: runner)
+                        FolderGroupView(group: group, color: color(for:),
+                                        runner: runner, startExpanded: startExpanded)
                     }
                 }
                 .padding(.trailing, 6)
@@ -411,6 +419,9 @@ struct JobDetailView: View {
             .frame(height: 320)
             if groups.count > cap {
                 Text("Showing first \(cap) of \(groups.count) folders. Sync still processes all of them.")
+                    .font(.caption2).foregroundStyle(.secondary).padding(.top, 4)
+            } else if !startExpanded {
+                Text("\(groups.count) folders, \(plan.items.count) items — folders start collapsed; click one to see its files.")
                     .font(.caption2).foregroundStyle(.secondary).padding(.top, 4)
             }
         }
@@ -473,7 +484,15 @@ struct FolderGroupView: View {
     let group: FolderGroup
     let color: (SyncAction) -> Color
     @ObservedObject var runner: JobRunner
-    @State private var expanded = true
+    @State private var expanded: Bool
+
+    init(group: FolderGroup, color: @escaping (SyncAction) -> Color,
+         runner: JobRunner, startExpanded: Bool = true) {
+        self.group = group
+        self.color = color
+        self._runner = ObservedObject(wrappedValue: runner)
+        self._expanded = State(initialValue: startExpanded)
+    }
 
     private var selectedInFolder: Int { group.items.filter { runner.isIncluded($0) }.count }
 
