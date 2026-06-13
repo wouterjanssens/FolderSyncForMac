@@ -14,7 +14,7 @@ enum AnalysisTab: String, CaseIterable, Identifiable {
 
 struct JobDetailView: View {
     @Binding var job: SyncJob
-    @StateObject private var runner = JobRunner()
+    @ObservedObject var runner: JobRunner
     @State private var sizeSide: SizeSide = .local
     @State private var analysisTab: AnalysisTab = .changes
 

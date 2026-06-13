@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var store: JobStore
     @EnvironmentObject var updater: UpdateChecker
+    @EnvironmentObject var runners: RunnerStore
 
     var body: some View {
         NavigationSplitView {
@@ -31,7 +32,10 @@ struct ContentView: View {
                 Button { store.addJob() } label: { Image(systemName: "plus") }
                     .help("Add a job")
                 Button {
-                    if let id = store.selection { store.removeJob(id) }
+                    if let id = store.selection {
+                        store.removeJob(id)
+                        runners.discard(id)
+                    }
                 } label: { Image(systemName: "minus") }
                     .help("Remove selected job")
                     .disabled(store.selection == nil)
@@ -51,7 +55,7 @@ struct ContentView: View {
     private var detail: some View {
         if let id = store.selection,
            let index = store.jobs.firstIndex(where: { $0.id == id }) {
-            JobDetailView(job: $store.jobs[index])
+            JobDetailView(job: $store.jobs[index], runner: runners.runner(for: id))
                 .id(id)
         } else {
             ContentUnavailableView {
