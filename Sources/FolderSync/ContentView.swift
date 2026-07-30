@@ -24,7 +24,7 @@ struct ContentView: View {
         VStack(spacing: 0) {
             List(selection: $store.selection) {
                 ForEach($store.jobs) { $job in
-                    JobRow(job: $job).tag(job.id)
+                    JobRow(job: $job, runner: runners.runner(for: job.id)).tag(job.id)
                 }
             }
             Divider()
@@ -69,6 +69,9 @@ struct ContentView: View {
 
 struct JobRow: View {
     @Binding var job: SyncJob
+    /// Observed so a job that is analyzing or syncing in the background keeps
+    /// its badge live while a different job is selected.
+    @ObservedObject var runner: JobRunner
 
     var body: some View {
         HStack(spacing: 10) {
@@ -85,6 +88,7 @@ struct JobRow: View {
                     .truncationMode(.head)
             }
             Spacer()
+            JobStatusBadge(status: runner.status)
             Toggle("", isOn: $job.enabled)
                 .toggleStyle(.switch)
                 .controlSize(.mini)

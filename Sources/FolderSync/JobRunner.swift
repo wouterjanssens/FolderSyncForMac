@@ -31,6 +31,25 @@ final class JobRunner: ObservableObject {
         return plan.errors.isEmpty && !includedIDs.isEmpty && !isSyncing && !isAnalyzing
     }
 
+    /// Current lifecycle stage, for the sidebar status badge. A running pass
+    /// always wins; otherwise the most recent outcome (sync result, then plan)
+    /// is what the job has to show.
+    var status: JobStatus {
+        if isSyncing { return .syncing(fraction: progress?.fraction ?? 0) }
+        if isAnalyzing { return .analyzing(fraction: analyzeProgress?.fraction) }
+        if let result {
+            if result.cancelled { return .cancelled }
+            if !result.errors.isEmpty { return .syncFailed(errors: result.errors.count) }
+            return .synced(changes: result.totalChanges)
+        }
+        if let plan {
+            if !plan.errors.isEmpty { return .analyzeFailed(errors: plan.errors.count) }
+            if plan.isEmpty { return .upToDate }
+            return .analyzed(changes: plan.items.count)
+        }
+        return .idle
+    }
+
     // MARK: Selection
 
     func isIncluded(_ item: PlanItem) -> Bool { includedIDs.contains(item.id) }
