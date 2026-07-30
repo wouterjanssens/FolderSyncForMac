@@ -22,11 +22,21 @@ struct ContentView: View {
 
     private var sidebar: some View {
         VStack(spacing: 0) {
-            List(selection: $store.selection) {
+            // Selection is drawn as a border rather than bound to the List's
+            // own `selection:`. The system highlight fills the whole row with
+            // the accent colour, which swallows the status badge sitting on
+            // it; `listRowBackground` cannot suppress that fill, so the
+            // binding is replaced with an explicit tap + border.
+            List {
                 ForEach($store.jobs) { $job in
-                    JobRow(job: $job, runner: runners.runner(for: job.id)).tag(job.id)
+                    JobRow(job: $job, runner: runners.runner(for: job.id))
+                        .listRowBackground(selectionBorder(for: job.id))
+                        .contentShape(Rectangle())
+                        .onTapGesture { store.selection = job.id }
                 }
             }
+            .focusable()
+            .onMoveCommand(perform: moveSelection)
             Divider()
             HStack(spacing: 6) {
                 Button { store.addJob() } label: { Image(systemName: "plus") }
@@ -49,6 +59,31 @@ struct ContentView: View {
         }
         .frame(minWidth: 240)
         .navigationTitle("FolderSync")
+    }
+
+    /// The selected row's outline. Drawn for every row so the List keeps a
+    /// stable row background; unselected rows just draw it fully transparent.
+    private func selectionBorder(for id: UUID) -> some View {
+        RoundedRectangle(cornerRadius: 6)
+            .strokeBorder(Color.accentColor, lineWidth: 2)
+            .opacity(store.selection == id ? 1 : 0)
+    }
+
+    /// Arrow-key navigation, which the List's own `selection:` binding used to
+    /// provide for free.
+    private func moveSelection(_ direction: MoveCommandDirection) {
+        guard !store.jobs.isEmpty else { return }
+        let current = store.jobs.firstIndex { $0.id == store.selection }
+        switch direction {
+        case .up:
+            let next = current.map { max(0, $0 - 1) } ?? store.jobs.count - 1
+            store.selection = store.jobs[next].id
+        case .down:
+            let next = current.map { min(store.jobs.count - 1, $0 + 1) } ?? 0
+            store.selection = store.jobs[next].id
+        default:
+            break
+        }
     }
 
     @ViewBuilder
