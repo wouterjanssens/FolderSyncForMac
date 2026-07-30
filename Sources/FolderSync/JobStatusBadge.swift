@@ -31,10 +31,11 @@ enum JobStatus: Equatable {
         case .idle:                        return ""
         case .analyzing:                   return "magnifyingglass"
         case .analyzed:                    return "checklist"
-        case .upToDate:                    return "checkmark.circle"
+        // An analysis that finds nothing to do leaves the job already in sync,
+        // so it reads as done rather than as a separate, weaker state.
+        case .upToDate, .synced:           return "checkmark.circle.fill"
         case .analyzeFailed, .syncFailed:  return "exclamationmark.triangle.fill"
         case .syncing:                     return "arrow.right"
-        case .synced:                      return "checkmark.circle.fill"
         case .cancelled:                   return "stop.circle.fill"
         }
     }
@@ -43,9 +44,8 @@ enum JobStatus: Equatable {
         switch self {
         case .idle:                        return .secondary
         case .analyzing, .analyzed:        return .blue
-        case .upToDate:                    return .secondary
         case .syncing:                     return .accentColor
-        case .synced:                      return .green
+        case .upToDate, .synced:           return .green
         case .cancelled:                   return .orange
         case .analyzeFailed, .syncFailed:  return .red
         }
