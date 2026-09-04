@@ -96,15 +96,39 @@ struct JobDetailView: View {
                     .fixedSize()
                 }
                 Text(job.deletionPolicy == .moveToDeletedFolder
-                     ? "Removed files are moved to a “\(SyncEngine.deletedFolderName)” folder at the remote root, keeping their subpath. Nothing is permanently deleted."
+                     ? "Removed files are moved to a “\(SyncEngine.deletedFolderName)/<date>” folder at the remote root, keeping their subpath."
                      : "Removed files are left untouched on the remote. The remote only grows.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                if job.deletionPolicy == .moveToDeletedFolder {
+                    HStack {
+                        Text("Permanently delete files in \(SyncEngine.deletedFolderName):")
+                        Picker("", selection: $job.deletedRetention) {
+                            ForEach(DeletedRetention.allCases) { retention in
+                                Text(retention.label).tag(retention)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                    }
+                    Text(retentionCaption)
+                        .font(.caption)
+                        .foregroundStyle(job.deletedRetention == .forever ? Color.secondary : Color.orange)
+                }
             }
             .padding(6)
         } label: {
             Label("Options", systemImage: "slider.horizontal.3")
         }
+    }
+
+    private var retentionCaption: String {
+        guard let days = job.deletedRetention.days else {
+            return "Nothing is ever permanently deleted. Empty the \(SyncEngine.deletedFolderName) folder by hand when you want the space back."
+        }
+        return "Each sync permanently erases day folders in \(SyncEngine.deletedFolderName) older than \(days) days. This cannot be undone. Files quarantined by older versions (not in a dated folder) are never touched."
     }
 
     // MARK: Actions
@@ -239,6 +263,11 @@ struct JobDetailView: View {
                 }
                 Text("Copied \(result.created) new, relocated \(result.moved), updated \(result.updated), moved \(result.deletedMoved) to _Deleted, created \(result.dirsCreated) folders — \(Format.bytes(result.bytesCopied)) copied.")
                     .font(.callout).foregroundStyle(.secondary)
+                if result.purgedFiles > 0 {
+                    Label("Permanently deleted \(result.purgedFiles) expired file\(result.purgedFiles == 1 ? "" : "s") from _Deleted (\(Format.bytes(result.purgedBytes)) freed).",
+                          systemImage: "trash.slash")
+                        .font(.callout).foregroundStyle(.orange)
+                }
 
                 if !result.errors.isEmpty {
                     DisclosureGroup("Errors") {

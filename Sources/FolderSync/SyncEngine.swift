@@ -305,8 +305,11 @@ struct SyncEngine {
 
     // MARK: - Execution
 
+    /// `now` is the clock used for the `_Deleted` day folder and the
+    /// retention cutoff; tests pass a fixed date.
     func execute(job: SyncJob,
                  plan: SyncPlan,
+                 now: Date = Date(),
                  progress: @escaping (SyncProgress) -> Void,
                  isCancelled: @escaping () -> Bool) -> SyncResult {
         let fm = FileManager.default
@@ -430,13 +433,17 @@ struct SyncEngine {
             if cancelledMid { result.cancelled = true; return result }
         }
 
-        // 4. Move orphaned remote files into _Deleted, preserving subpath.
+        // 4. Move orphaned remote files into _Deleted/<today>/, preserving
+        //    subpath. The dated day folder is what makes time-based purging
+        //    possible: moving a file keeps its original mtime, so the folder
+        //    name is the only reliable record of *when* it was quarantined.
         let deletedRoot = remote.appendingPathComponent(SyncEngine.deletedFolderName, isDirectory: true)
+        let dayRoot = deletedRoot.appendingPathComponent(SyncEngine.dayFolderName(for: now), isDirectory: true)
         for item in plan.items where item.action == .delete && !item.isDirectory {
             if isCancelled() { result.cancelled = true; return result }
             autoreleasepool {
                 let src = remote.appendingPathComponent(item.relativePath)
-                let dst = uniqueDestination(deletedRoot.appendingPathComponent(item.relativePath), fm: fm)
+                let dst = uniqueDestination(dayRoot.appendingPathComponent(item.relativePath), fm: fm)
                 do {
                     try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
                     try fm.moveItem(at: src, to: dst)
@@ -449,8 +456,96 @@ struct SyncEngine {
             }
         }
 
+        // 5. Permanently remove day folders in _Deleted that outlived the
+        //    job's retention period. Runs after every sync, even one with no
+        //    deletions, so old quarantine eventually drains.
+        if job.deletionPolicy == .moveToDeletedFolder, let days = job.deletedRetention.days {
+            if isCancelled() { result.cancelled = true; return result }
+            report(phase: "Purging expired _Deleted folders", file: "", force: true)
+            let purge = purgeExpired(deletedRoot: deletedRoot, olderThan: days, now: now,
+                                     fm: fm, isCancelled: isCancelled)
+            result.purgedFiles += purge.files
+            result.purgedBytes += purge.bytes
+            result.errors.append(contentsOf: purge.errors)
+            if purge.cancelled { result.cancelled = true; return result }
+        }
+
         report(phase: "Done", file: "", force: true)
         return result
+    }
+
+    // MARK: - _Deleted retention
+
+    /// Name of the day folder inside `_Deleted` that receives files quarantined
+    /// on `date`: `yyyy-MM-dd` in the local calendar.
+    static func dayFolderName(for date: Date) -> String {
+        dayFormatter.string(from: date)
+    }
+
+    /// Inverse of `dayFolderName(for:)`. Nil for anything that is not a day
+    /// folder — including files quarantined by versions before dated folders
+    /// existed, which are left alone by the purge.
+    static func dayFolderDate(_ name: String) -> Date? {
+        guard name.count == 10 else { return nil }
+        return dayFormatter.date(from: name)
+    }
+
+    private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    /// The day folders under `deletedRoot` whose date is more than `days`
+    /// days before `now`. Sorted oldest first. Undated entries are ignored.
+    func expiredDayFolders(deletedRoot: URL, olderThan days: Int, now: Date,
+                           fm: FileManager = .default) -> [URL] {
+        guard let entries = try? fm.contentsOfDirectory(at: deletedRoot,
+                                                        includingPropertiesForKeys: [.isDirectoryKey],
+                                                        options: [.skipsHiddenFiles]) else { return [] }
+        let calendar = Calendar(identifier: .gregorian)
+        guard let cutoff = calendar.date(byAdding: .day, value: -days,
+                                         to: calendar.startOfDay(for: now)) else { return [] }
+        return entries
+            .compactMap { url -> (URL, Date)? in
+                guard (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true,
+                      let date = SyncEngine.dayFolderDate(url.lastPathComponent) else { return nil }
+                return (url, date)
+            }
+            .filter { $0.1 < cutoff }
+            .sorted { $0.1 < $1.1 }
+            .map { $0.0 }
+    }
+
+    struct PurgeOutcome {
+        var files = 0
+        var bytes: Int64 = 0
+        var errors: [String] = []
+        var cancelled = false
+    }
+
+    /// Delete every expired day folder in `_Deleted`. Files are counted and
+    /// sized before removal so the result can say what was destroyed.
+    func purgeExpired(deletedRoot: URL, olderThan days: Int, now: Date,
+                      fm: FileManager = .default,
+                      isCancelled: () -> Bool = { false }) -> PurgeOutcome {
+        var outcome = PurgeOutcome()
+        for folder in expiredDayFolders(deletedRoot: deletedRoot, olderThan: days, now: now, fm: fm) {
+            if isCancelled() { outcome.cancelled = true; return outcome }
+            let (files, _) = scan(root: folder, excludes: [])
+            let regular = files.values.filter { !$0.isDirectory }
+            do {
+                try fm.removeItem(at: folder)
+                outcome.files += regular.count
+                outcome.bytes += regular.reduce(0) { $0 + $1.size }
+            } catch {
+                outcome.errors.append("Purge \(SyncEngine.deletedFolderName)/\(folder.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+        return outcome
     }
 
     /// Files at or above this size are streamed in chunks so progress and

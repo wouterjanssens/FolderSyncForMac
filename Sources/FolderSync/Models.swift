@@ -18,6 +18,37 @@ enum DeletionPolicy: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// How long quarantined files stay in `_Deleted` before they are permanently
+/// removed. Only meaningful when the deletion policy is `.moveToDeletedFolder`.
+enum DeletedRetention: String, Codable, CaseIterable, Identifiable {
+    /// Never purge. `_Deleted` grows until emptied by hand (the historic behavior).
+    case forever
+    case days7
+    case days30
+    case days90
+
+    var id: String { rawValue }
+
+    /// Number of days a quarantined file is kept; nil for `.forever`.
+    var days: Int? {
+        switch self {
+        case .forever: return nil
+        case .days7:   return 7
+        case .days30:  return 30
+        case .days90:  return 90
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .forever: return "Never (keep forever)"
+        case .days7:   return "After 7 days"
+        case .days30:  return "After 30 days"
+        case .days90:  return "After 90 days"
+        }
+    }
+}
+
 /// A single configured local→remote folder pair.
 struct SyncJob: Identifiable, Codable, Hashable {
     var id: UUID = UUID()
@@ -26,12 +57,47 @@ struct SyncJob: Identifiable, Codable, Hashable {
     var remotePath: String
     var enabled: Bool = true
     var deletionPolicy: DeletionPolicy = .moveToDeletedFolder
+    /// When to permanently delete files that were moved into `_Deleted`.
+    var deletedRetention: DeletedRetention = .forever
     var excludes: [String] = SyncJob.defaultExcludes
 
     static let defaultExcludes = [
         ".DS_Store", ".Spotlight-V100", ".Trashes", ".fseventsd",
         ".TemporaryItems", ".DocumentRevisions-V100", "._.DS_Store"
     ]
+
+    init(id: UUID = UUID(), name: String, localPath: String, remotePath: String,
+         enabled: Bool = true,
+         deletionPolicy: DeletionPolicy = .moveToDeletedFolder,
+         deletedRetention: DeletedRetention = .forever,
+         excludes: [String] = SyncJob.defaultExcludes) {
+        self.id = id
+        self.name = name
+        self.localPath = localPath
+        self.remotePath = remotePath
+        self.enabled = enabled
+        self.deletionPolicy = deletionPolicy
+        self.deletedRetention = deletedRetention
+        self.excludes = excludes
+    }
+
+    // Hand-written decoding so jobs saved by older versions (which lack
+    // `deletedRetention`) still load, defaulting to "keep forever".
+    private enum CodingKeys: String, CodingKey {
+        case id, name, localPath, remotePath, enabled, deletionPolicy, deletedRetention, excludes
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        localPath = try c.decode(String.self, forKey: .localPath)
+        remotePath = try c.decode(String.self, forKey: .remotePath)
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        deletionPolicy = try c.decodeIfPresent(DeletionPolicy.self, forKey: .deletionPolicy) ?? .moveToDeletedFolder
+        deletedRetention = try c.decodeIfPresent(DeletedRetention.self, forKey: .deletedRetention) ?? .forever
+        excludes = try c.decodeIfPresent([String].self, forKey: .excludes) ?? SyncJob.defaultExcludes
+    }
 }
 
 /// The kind of change a plan item represents.
@@ -157,6 +223,10 @@ struct SyncResult {
     var deletedMoved: Int = 0
     var dirsCreated: Int = 0
     var bytesCopied: Int64 = 0
+    /// Files permanently removed from `_Deleted` because they outlived the
+    /// job's retention period. This is the only place data is truly destroyed.
+    var purgedFiles: Int = 0
+    var purgedBytes: Int64 = 0
     var errors: [String] = []
     var cancelled: Bool = false
 

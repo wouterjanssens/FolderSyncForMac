@@ -150,3 +150,66 @@ import Testing
     #expect(move?.relativePath == "new/location.txt")
     #expect(move?.fromPath == "old/location.txt")
 }
+
+// MARK: - _Deleted retention
+
+@Test func dayFolderNameRoundTrips() {
+    #expect(TestSupport.dayFolderNameRoundTrips())
+    #expect(SyncEngine.dayFolderDate("old.txt") == nil)
+    #expect(SyncEngine.dayFolderDate("2026-13-45") == nil)
+}
+
+@Test func syncQuarantinesIntoDatedFolder() throws {
+    let ws = try TempWorkspace(); defer { ws.cleanup() }
+    try ws.write(.remote, "sub/gone.txt", "orphan")
+
+    let result = ws.sync()
+    #expect(result.deletedMoved == 1)
+    #expect(result.purgedFiles == 0)
+    #expect(!ws.exists(.remote, "sub/gone.txt"))
+    #expect(ws.exists(.remote, ws.quarantined("sub/gone.txt")))
+}
+
+@Test func syncPurgesExpiredDayFoldersOnly() throws {
+    let ws = try TempWorkspace(); defer { ws.cleanup() }
+    let old = ws.quarantined("a.txt", daysAgo: 31)
+    let edge = ws.quarantined("b.txt", daysAgo: 30)
+    let recent = ws.quarantined("c.txt", daysAgo: 1)
+    let legacy = "\(SyncEngine.deletedFolderName)/legacy.txt"
+    try ws.write(.remote, old, "12345")
+    try ws.write(.remote, edge, "x")
+    try ws.write(.remote, recent, "x")
+    try ws.write(.remote, legacy, "x")
+    try ws.write(.local, "new.txt", "so the plan is not empty")
+
+    let result = ws.sync(retention: .days30)
+    #expect(result.errors.isEmpty)
+    #expect(result.purgedFiles == 1)
+    #expect(result.purgedBytes == 5)
+    #expect(!ws.exists(.remote, old))
+    #expect(ws.exists(.remote, edge))
+    #expect(ws.exists(.remote, recent))
+    #expect(ws.exists(.remote, legacy))
+}
+
+@Test func syncKeepsForeverByDefault() throws {
+    let ws = try TempWorkspace(); defer { ws.cleanup() }
+    let old = ws.quarantined("a.txt", daysAgo: 400)
+    try ws.write(.remote, old, "x")
+    try ws.write(.local, "new.txt", "x")
+
+    let result = ws.sync()
+    #expect(result.purgedFiles == 0)
+    #expect(ws.exists(.remote, old))
+}
+
+@Test func additivePolicyNeverPurges() throws {
+    let ws = try TempWorkspace(); defer { ws.cleanup() }
+    let old = ws.quarantined("a.txt", daysAgo: 400)
+    try ws.write(.remote, old, "x")
+    try ws.write(.local, "new.txt", "x")
+
+    let result = ws.sync(policy: .keepOnRemote, retention: .days7)
+    #expect(result.purgedFiles == 0)
+    #expect(ws.exists(.remote, old))
+}
