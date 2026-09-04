@@ -15,9 +15,13 @@ but drops everything you don't need.
   **current and average speed (MB/s)**, and an **estimated time remaining** — large files are
   streamed in chunks so progress keeps moving mid-transfer, which matters most over the network.
 - **Safe deletions:** when a file no longer exists locally, instead of deleting it on the
-  remote it is **moved into a `_Deleted` folder** at the remote root, keeping its original
-  subpath. So you always know what to clean up later, and nothing is ever truly lost.
+  remote it is **moved into a `_Deleted/<yyyy-MM-dd>` folder** at the remote root, keeping its
+  original subpath. So you always know what to clean up later, and nothing is ever truly lost.
   (Per-job, you can switch to "additive only" — never touch removed files.)
+- **Optional retention:** per job, choose to permanently delete quarantined files after
+  7, 30 or 90 days. Each sync then erases the day folders in `_Deleted` that are older than
+  the chosen period. The default is "keep forever". Files quarantined by versions before
+  dated folders existed sit directly under `_Deleted` and are never purged automatically.
 - **Move detection:** if a file was simply renamed or relocated locally, FolderSync detects
   it (same size + modification time, confirmed by a content hash) and **moves the existing
   file on the remote** instead of re-copying it and quarantining the old copy. This avoids
@@ -91,7 +95,8 @@ file access — allow it.
 
 - `Sources/FolderSync/SyncEngine.swift` — the engine. Pure `FileManager`, no rsync dependency,
   so the `_Deleted` behavior is exact and predictable. `analyze()` walks both trees and builds
-  a plan; `execute()` runs it (create dirs → copy files → move orphans to `_Deleted`).
+  a plan; `execute()` runs it (create dirs → copy files → move orphans to `_Deleted/<date>` →
+  purge expired day folders if the job has a retention period).
 - `Models.swift` — job, plan, and result types.
 - `JobStore.swift` — persists jobs to `~/Library/Application Support/FolderSync/jobs.json`.
 - `JobRunner.swift` — runs analyze/sync off the main thread with live progress + cancel.

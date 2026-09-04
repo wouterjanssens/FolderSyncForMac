@@ -100,3 +100,23 @@ private func item(_ action: SyncAction, _ path: String, size: Int64 = 0,
     #expect(job.enabled)
     #expect(job.deletionPolicy == .moveToDeletedFolder)
 }
+
+@Test func deletedRetentionIsCodableRoundTrip() throws {
+    for retention in DeletedRetention.allCases {
+        var job = SyncJob(name: "x", localPath: "/a", remotePath: "/b")
+        job.deletedRetention = retention
+        #expect(try TestSupport.jobRoundTrip(job).deletedRetention == retention)
+    }
+}
+
+@Test func legacyJobWithoutRetentionDecodesAsForever() throws {
+    let job = try TestSupport.decodeLegacyJob()
+    #expect(job.name == "old")
+    #expect(job.deletionPolicy == .moveToDeletedFolder)
+    #expect(job.deletedRetention == .forever)
+}
+
+@Test func retentionDays() {
+    #expect(DeletedRetention.forever.days == nil)
+    #expect(DeletedRetention.days30.days == 30)
+}
